@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v4.0
-Interactive Cross-Platform Metadata Stripper, Privacy Suite, and System Doctor.
-Works on Windows, macOS, Linux, and Android (Termux).
+ShotClean Universal Studio v4.1
+Cross-platform metadata stripper with live GitHub update detection and 1-click upgrade.
 """
 
 import json
@@ -13,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -20,7 +20,67 @@ from pathlib import Path
 if platform.system() == "Windows":
     os.system("")
 
-# 256-Color Palette
+# ==============================================================================
+# VERSION & GITHUB UPDATE SYSTEM
+# ==============================================================================
+
+CURRENT_VERSION = "4.0.0"
+
+# CHANGE THIS to your GitHub username and repository:
+GITHUB_REPO = "your_username/shotclean"
+
+LATEST_VERSION = None
+UPDATE_AVAILABLE = False
+
+
+def check_updates_background():
+    """Silently queries GitHub Releases API in the background."""
+    global LATEST_VERSION, UPDATE_AVAILABLE
+    if GITHUB_REPO == "your_username/shotclean":
+        return  # Skip if placeholder has not been replaced yet
+
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": f"ShotClean/{CURRENT_VERSION}"}
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            remote_tag = data.get("tag_name", "").lstrip("v")
+            if remote_tag and remote_tag != CURRENT_VERSION:
+                LATEST_VERSION = remote_tag
+                UPDATE_AVAILABLE = True
+    except Exception:
+        # Fails silently if user is offline or GitHub rate-limits
+        pass
+
+
+def perform_git_update():
+    """Runs git pull and re-launches the script automatically."""
+    print(f"\n  {CLR_CYAN}Pulling latest updates from GitHub...{NC}")
+    try:
+        res = subprocess.run(["git", "pull"], capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"  {CLR_GREEN}{BOLD}✔ Update successful! Restarting ShotClean...{NC}\n")
+            time.sleep(1.2)
+            # Replaces the current process with the newly pulled code
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print(f"  {CLR_RED}✖ Update failed:{NC}\n{res.stderr}")
+            input("  Press [Enter] to continue...")
+    except Exception as e:
+        print(f"  {CLR_RED}✖ Git command failed: {e}{NC}")
+        input("  Press [Enter] to continue...")
+
+
+# Start background update check immediately on boot
+threading.Thread(target=check_updates_background, daemon=True).start()
+
+# ==============================================================================
+# STYLING & CORE CONFIGURATION
+# ==============================================================================
+
 CLR_CYAN = "\033[38;5;51m"
 CLR_BLUE = "\033[38;5;75m"
 CLR_GREEN = "\033[38;5;82m"
@@ -35,10 +95,6 @@ DIM = "\033[2m"
 NC = "\033[0m"
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
-
-# ==============================================================================
-# CONFIGURATION & STORAGE PATHS
-# ==============================================================================
 
 HOME = Path.home()
 SHOTCLEAN_DIR = HOME / ".shotclean"
@@ -97,7 +153,7 @@ def log_event(msg: str):
 
 
 # ==============================================================================
-# 1. SYSTEM DOCTOR (AUTO-INSTALLER & HEALTH CHECK)
+# SYSTEM DOCTOR
 # ==============================================================================
 
 class SystemDoctor:
@@ -145,19 +201,17 @@ class SystemDoctor:
         else:
             print(f"  {CLR_GREEN}[✔]{NC} Core binary   : 'exiftool' (Installed)")
 
-        print(f"\n  {CLR_AMBER}{BOLD}Action Needed:{NC} ShotClean requires these tools to sanitize images.")
+        print(f"\n  {CLR_AMBER}{BOLD}Action Needed:{NC} Dependencies required.")
         choice = input("  Install them automatically now? [Y/n]: ").strip().lower()
 
         if choice in ["n", "no"]:
             print(f"\n  {CLR_RED}Dependencies missing. Exiting...{NC}")
             sys.exit(1)
 
-        # Install PIP packages
         if missing_pip:
             print(f"\n  {CLR_CYAN}Installing 'watchdog' via pip...{NC}")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "watchdog"])
 
-        # Install exiftool
         if "exiftool" in missing_bins:
             print(f"\n  {CLR_CYAN}Installing 'exiftool' via system package manager...{NC}")
             os_name = cls.get_os_string()
@@ -188,14 +242,13 @@ class SystemDoctor:
         return True
 
 
-# Run self-diagnostic before importing watchdog
 SystemDoctor.check_and_install(interactive=True)
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # ==============================================================================
-# 2. FILE PROCESSING ENGINE
+# SANITIZER & WATCHER ENGINE
 # ==============================================================================
 
 def is_file_ready(filepath: Path, timeout: float = 3.5) -> bool:
@@ -233,7 +286,6 @@ def process_image_file(filepath: Path):
 
     time.sleep(0.1)
 
-    # 1. Optional Backup Vault
     if cfg.get("enable_backup", False):
         try:
             backup_name = f"{filepath.stem}_{int(time.time())}{filepath.suffix}"
@@ -241,7 +293,6 @@ def process_image_file(filepath: Path):
         except Exception:
             pass
 
-    # 2. Strip Metadata with ExifTool
     if cfg.get("strip_exif", True):
         try:
             subprocess.run(
@@ -256,7 +307,6 @@ def process_image_file(filepath: Path):
 
     target_path = filepath
 
-    # 3. Hash Renaming
     if cfg.get("random_hash", True):
         rand_token = uuid.uuid4().hex[:12]
         new_name = f"{prefix}{rand_token}{filepath.suffix.lower()}"
@@ -266,7 +316,6 @@ def process_image_file(filepath: Path):
         except OSError:
             target_path = filepath
 
-    # 4. Anti-Forensic Timestamp Clamping (2020-01-01)
     if cfg.get("clamp_time", True):
         try:
             epoch_2020 = 1577836800.0
@@ -274,7 +323,6 @@ def process_image_file(filepath: Path):
         except OSError:
             pass
 
-    # Refresh Android MediaStore if on Termux
     if "com.termux" in os.environ.get("PREFIX", ""):
         subprocess.run(
             ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{target_path}"],
@@ -334,7 +382,7 @@ class DaemonManager:
 
 
 # ==============================================================================
-# 3. INTERACTIVE DASHBOARD & AUDIT TOOLS
+# UI DASHBOARD & TOOLS
 # ==============================================================================
 
 def pill(val: bool) -> str:
@@ -348,9 +396,16 @@ def draw_dashboard():
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
     print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}Universal Studio v4.0{NC}        {CLR_CYAN}│{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}            {CLR_CYAN}│{NC}")
     print(f"{CLR_CYAN}│{NC}  {DIM}Cross-Platform Privacy & Anti-Forensics Suite         {NC}{CLR_CYAN}│{NC}")
     print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}")
+
+    # LIVE UPDATE BANNER
+    if UPDATE_AVAILABLE:
+        print(f"{CLR_AMBER}╭────────────────────────────────────────────────────────╮{NC}")
+        print(f"{CLR_AMBER}│{NC}  {BOLD}🔔 UPDATE AVAILABLE: v{LATEST_VERSION}{NC}                           {CLR_AMBER}│{NC}")
+        print(f"{CLR_AMBER}│{NC}  Press {CLR_CYAN}[U]{NC} to pull and install update automatically     {CLR_AMBER}│{NC}")
+        print(f"{CLR_AMBER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_BLUE}{BOLD}SYSTEM HEALTH{NC}{CLR_BORDER} ───────────────────────────────────────╮{NC}")
     print(f"{CLR_BORDER}│{NC}  OS Environment :  {BOLD}{SystemDoctor.get_os_string()}{NC}")
@@ -364,8 +419,8 @@ def draw_dashboard():
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_WHITE}{BOLD}CONTROLS & CONFIGURATION{NC}{CLR_BORDER} ────────────────────────────╮{NC}")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[1]{NC} ⚡ Toggle Watcher Engine ({'Halt' if DaemonManager.is_running else 'Start'})")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[2]{NC} 📁 Manage Monitored Folders (Add / Remove)")
+    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[1]{NC} ⚡ Toggle Engine ({'Halt' if DaemonManager.is_running else 'Start'})")
+    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[2]{NC} 📁 Manage Monitored Folders")
     print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[3]{NC} 🎭 Privacy Profiles (Ghost / Balanced / Preserve)")
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
@@ -375,21 +430,17 @@ def draw_dashboard():
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_WHITE}{BOLD}AUDIT & TOOLS{NC}{CLR_BORDER} ───────────────────────────────────────╮{NC}")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[8]{NC} 🔍 Live EXIF Audit (Inspect latest image)")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[9]{NC} 🧹 Bulk Clean Monitored Folders (Scrub existing)")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[10]{NC} 📜 View Recent Activity Logs")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[11]{NC} 🩺 Run System Doctor (Audit dependencies)")
-    print(f"{CLR_BORDER}│{NC}  {CLR_RED}[0]{NC}  🚪 Exit Suite")
+    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[8]{NC} 🔍 Live EXIF Audit      {CLR_CYAN}[9]{NC} 🧹 Bulk Clean Folders")
+    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[10]{NC} 📜 Activity Logs       {CLR_CYAN}[11]{NC} 🩺 System Doctor")
+    if UPDATE_AVAILABLE:
+        print(f"{CLR_BORDER}│{NC}  {CLR_AMBER}[U]  🚀 Update to v{LATEST_VERSION}{NC}")
+    print(f"{CLR_BORDER}│{NC}  {CLR_RED}[0]   🚪 Exit Suite{NC}")
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
 
-# --- Tool 1: Live EXIF Audit ---
 def tool_live_audit():
     os.system("cls" if os.name == "nt" else "clear")
-    print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🔍  METADATA PRIVACY AUDIT & INSPECTOR{NC}                {CLR_CYAN}│{NC}")
-    print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}\n")
-
+    print(f"{CLR_CYAN}=== Live EXIF Audit ==={NC}\n")
     cfg = load_config()
     candidates = []
     for f in cfg.get("folders", []):
@@ -399,53 +450,38 @@ def tool_live_audit():
                 candidates.extend(p.glob(f"*{ext}"))
 
     if not candidates:
-        print(f"  {CLR_AMBER}No images found across your monitored folders.{NC}\n")
+        print(f"  {CLR_AMBER}No images found to audit.{NC}\n")
         input("  Press [Enter] to return...")
         return
 
     latest_file = max(candidates, key=lambda f: f.stat().st_mtime)
-    print(f"  Target Image: {BOLD}{latest_file.name}{NC}")
-    print(f"  Directory   : {CLR_GRAY}{latest_file.parent}{NC}\n")
+    print(f"  Target: {BOLD}{latest_file.name}{NC}\n")
 
-    print(f"{CLR_BORDER}── EXIF / XMP METADATA CHECK ────────────────────────────{NC}")
     res = subprocess.run(
         ["exiftool", "-exif:all", "-xmp:all", "-iptc:all", str(latest_file)],
         capture_output=True, text=True
     )
-
     if not res.stdout.strip():
-        print(f"  {CLR_GREEN}{BOLD}✔ 100% CLEAN - ZERO EXIF/XMP METADATA DETECTED!{NC}")
+        print(f"  {CLR_GREEN}{BOLD}✔ 100% CLEAN - ZERO METADATA DETECTED!{NC}")
     else:
-        print(f"  {CLR_RED}{BOLD}⚠ LEAK DETECTED - Found metadata tags:{NC}")
-        print(res.stdout)
+        print(f"  {CLR_RED}{BOLD}⚠ LEAKS DETECTED:{NC}\n{res.stdout}")
 
-    print(f"\n{CLR_BORDER}── FILESYSTEM TIMESTAMPS ────────────────────────────────{NC}")
     st = latest_file.stat()
-    print(f"  Modification Time : {time.ctime(st.st_mtime)}")
-    print(f"  Access Time       : {time.ctime(st.st_atime)}")
-    print(f"{CLR_BORDER}─────────────────────────────────────────────────────────{NC}\n")
+    print(f"\n  Modified: {time.ctime(st.st_mtime)}")
+    print(f"  Accessed: {time.ctime(st.st_atime)}\n")
     input("  Press [Enter] to return...")
 
 
-# --- Tool 2: Bulk Cleaner ---
 def tool_bulk_clean():
     os.system("cls" if os.name == "nt" else "clear")
     cfg = load_config()
-    print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🧹  BULK METADATA SCRUBBER{NC}                            {CLR_CYAN}│{NC}")
-    print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}\n")
-    print("  This will sanitize ALL existing images across monitored folders:\n")
-
+    print(f"{CLR_CYAN}=== Bulk Scrubber ==={NC}\n")
     folders = [Path(f) for f in cfg.get("folders", []) if Path(f).exists()]
-    for f in folders:
-        print(f"   • {f}")
-
-    print("")
-    confirm = input("  Proceed with bulk cleaning? [y/N]: ").strip().lower()
+    confirm = input("  Scrub all existing photos across monitored folders? [y/N]: ").strip().lower()
     if confirm not in ["y", "yes"]:
         return
 
-    cleaned_count = 0
+    count = 0
     for folder in folders:
         for ext in VALID_EXTENSIONS:
             for img in folder.glob(f"*{ext}"):
@@ -456,46 +492,31 @@ def tool_bulk_clean():
                     )
                     if cfg.get("clamp_time", True):
                         os.utime(img, (1577836800.0, 1577836800.0))
-                    cleaned_count += 1
-
-    print(f"\n  {CLR_GREEN}{BOLD}✔ Done! Cleaned {cleaned_count} files.{NC}\n")
+                    count += 1
+    print(f"\n  {CLR_GREEN}✔ Scrubbed {count} images.{NC}\n")
     time.sleep(1.2)
 
 
-# --- Tool 3: Manage Folders ---
 def tool_manage_folders():
     while True:
         os.system("cls" if os.name == "nt" else "clear")
         cfg = load_config()
-        print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  {BOLD}📁  MONITORED FOLDERS MANAGER{NC}                         {CLR_CYAN}│{NC}")
-        print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}\n")
-
         folders = cfg.get("folders", [])
-        for i, folder in enumerate(folders, 1):
-            p = Path(folder)
-            status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Not Found{NC}"
-            print(f"  [{i}] {folder} ({status})")
-
-        print(f"\n{CLR_BORDER}─────────────────────────────────────────────────────────{NC}")
-        print(f"  {CLR_CYAN}[1]{NC} Add New Folder Path")
-        print(f"  {CLR_CYAN}[2] {NC}Quick Preset (OS Screenshot Folder)")
-        print(f"  {CLR_CYAN}[3]{NC} Remove a Folder")
-        print(f"  {CLR_CYAN}[0]{NC} Back to Main Menu")
-        print(f"{CLR_BORDER}─────────────────────────────────────────────────────────{NC}")
-        c = input("  Select [0-3]: ").strip()
+        print(f"{CLR_CYAN}=== Monitored Folders ==={NC}\n")
+        for i, f in enumerate(folders, 1):
+            p = Path(f)
+            status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Missing{NC}"
+            print(f"  [{i}] {f} ({status})")
+        print(f"\n  [1] Add Custom Path   [2] Quick Preset   [3] Delete   [0] Back")
+        c = input("  Select: ").strip()
 
         if c == "1":
-            new_path = input("\n  Enter full directory path: ").strip()
-            p = Path(new_path)
-            if p.exists() and p.is_dir():
-                if str(p) not in folders:
-                    folders.append(str(p))
-                    cfg["folders"] = folders
-                    save_config(cfg)
-                    DaemonManager.restart()
-            else:
-                print(f"  {CLR_RED}Directory does not exist.{NC}"); time.sleep(1)
+            p = Path(input("\n  Enter folder path: ").strip())
+            if p.exists() and p.is_dir() and str(p) not in folders:
+                folders.append(str(p))
+                cfg["folders"] = folders
+                save_config(cfg)
+                DaemonManager.restart()
         elif c == "2":
             def_path = str(detect_default_folder())
             if def_path not in folders:
@@ -504,7 +525,7 @@ def tool_manage_folders():
                 save_config(cfg)
                 DaemonManager.restart()
         elif c == "3":
-            idx = input(f"  Enter index to remove [1-{len(folders)}]: ").strip()
+            idx = input(f"  Index to remove [1-{len(folders)}]: ").strip()
             if idx.isdigit() and 1 <= int(idx) <= len(folders):
                 folders.pop(int(idx) - 1)
                 cfg["folders"] = folders
@@ -514,54 +535,24 @@ def tool_manage_folders():
             break
 
 
-# --- Tool 4: Privacy Profiles ---
 def tool_profiles():
     os.system("cls" if os.name == "nt" else "clear")
     cfg = load_config()
-    print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🎭  SELECT PRIVACY PROFILE{NC}                            {CLR_CYAN}│{NC}")
-    print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}\n")
-    print(f"  {CLR_PURPLE}{BOLD}[1] Ghost Mode (Max Anti-Forensics){NC}")
-    print(f"      Scrub EXIF: ON · Random Hash: ON · Time Clamping: ON\n")
-    print(f"  {CLR_GREEN}{BOLD}[2] Balanced Mode (Recommended){NC}")
-    print(f"      Scrub EXIF: ON · Random Hash: ON · Time Clamping: OFF\n")
-    print(f"  {CLR_BLUE}{BOLD}[3] Preserve Mode (Keep File Names){NC}")
-    print(f"      Scrub EXIF: ON · Random Hash: OFF · Time Clamping: OFF\n")
-    print(f"{CLR_BORDER}─────────────────────────────────────────────────────────{NC}")
-    c = input("  Select [1-3] or [Enter] to cancel: ").strip()
-
+    print(f"{CLR_CYAN}=== Profiles ==={NC}\n")
+    print("  [1] Ghost (Scrub + Rename + Time Clamp)")
+    print("  [2] Balanced (Scrub + Rename)")
+    print("  [3] Preserve (Scrub only, keep filename)")
+    c = input("\n  Select [1-3]: ").strip()
     if c == "1":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = True
-        cfg["clamp_time"] = True
+        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = True
     elif c == "2":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = True
-        cfg["clamp_time"] = False
+        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = False
     elif c == "3":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = False
-        cfg["clamp_time"] = False
+        cfg["strip_exif"] = True; cfg["random_hash"] = False; cfg["clamp_time"] = False
     else:
         return
-
     save_config(cfg)
     DaemonManager.restart()
-    print(f"  {CLR_GREEN}✔ Profile applied.{NC}")
-    time.sleep(0.8)
-
-
-# --- Tool 5: Activity Logs ---
-def tool_view_logs():
-    os.system("cls" if os.name == "nt" else "clear")
-    print(f"{CLR_CYAN}=== Activity Logs (Last 25 entries) ==={NC}\n")
-    if LOG_FILE.exists():
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-25:]
-            print("".join(lines) if lines else "  No activity logged yet.\n")
-    else:
-        print("  No activity logged yet.\n")
-    input("  Press [Enter] to return...")
 
 
 def toggle_cfg(key: str):
@@ -572,22 +563,20 @@ def toggle_cfg(key: str):
 
 
 # ==============================================================================
-# 4. MAIN INTERACTION LOOP
+# MAIN LOOP
 # ==============================================================================
 
 def main():
-    # Start background watcher automatically on load
     DaemonManager.start()
 
     while True:
         draw_dashboard()
-        choice = input(" ❯ Select option [0-11]: ").strip()
+        choice = input(" ❯ Select option: ").strip()
 
-        if choice == "1":
-            if DaemonManager.is_running:
-                DaemonManager.stop()
-            else:
-                DaemonManager.start()
+        if choice.lower() == "u" and UPDATE_AVAILABLE:
+            perform_git_update()
+        elif choice == "1":
+            DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
         elif choice == "2":
             tool_manage_folders()
         elif choice == "3":
@@ -605,14 +594,18 @@ def main():
         elif choice == "9":
             tool_bulk_clean()
         elif choice == "10":
-            tool_view_logs()
+            os.system("cls" if os.name == "nt" else "clear")
+            if LOG_FILE.exists():
+                with open(LOG_FILE, "r", encoding="utf-8") as f:
+                    print("".join(f.readlines()[-25:]))
+            input("\n  Press [Enter] to return...")
         elif choice == "11":
             os.system("cls" if os.name == "nt" else "clear")
             SystemDoctor.check_and_install(interactive=True)
             input("  Press [Enter] to return...")
         elif choice == "0":
             DaemonManager.stop()
-            print(f"\n  {CLR_GREEN}ShotClean halted cleanly. Stay safe!{NC}\n")
+            print(f"\n  {CLR_GREEN}Shutdown complete. Stay safe!{NC}\n")
             sys.exit(0)
 
 
