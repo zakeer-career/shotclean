@@ -25,7 +25,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB UPDATE SYSTEM
 # ==============================================================================
 
-CURRENT_VERSION = "4.0.0"
+CURRENT_VERSION = "4.0.1"
 
 # Change this to your GitHub username and repository name:
 GITHUB_REPO = "your_username/shotclean"
