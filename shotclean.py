@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v5.1.0
+ShotClean Universal Studio v5.2.0
 Cross-platform metadata stripper, anti-forensics suite & granular folder protection.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -32,7 +32,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "5.1.0"
+CURRENT_VERSION = "5.2.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -172,28 +172,38 @@ DEFAULT_FOLDER_PROFILE = {
     "strip_exif": True,
     "strip_icc": True,
     "clamp_time": True,
+    "clamp_mode": "static_2020",  # static_2020, random_fuzz, day_fuzz, epoch_1970, custom
+    "clamp_custom_date": "2020-01-01 00:00:00",
+    "clamp_mtime": True,
+    "clamp_atime": True,
     "random_hash": True,
-    "naming_mode": "hash",
+    "naming_mode": "hash",        # hash, slug, decoy_wa, decoy_dcim, decoy_reddit, disabled
     "prefix": "img_",
+    "suffix": "",
+    "casing": "lower",            # lower, upper
     "hash_len": 12,
 }
 
 PROFILE_PRESETS = {
     "ghost": {
         "label": "🛡️ Ghost (Full Scrub + Clamped 2020 + UUID Hash)",
-        "strip_exif": True, "strip_icc": True, "clamp_time": True, "random_hash": True, "naming_mode": "hash"
+        "strip_exif": True, "strip_icc": True, "clamp_time": True, "clamp_mode": "static_2020",
+        "random_hash": True, "naming_mode": "hash"
     },
     "balanced": {
-        "label": "⚖️ Balanced (Scrub + Word Slug - Shows in Today's Gallery)",
-        "strip_exif": True, "strip_icc": True, "clamp_time": False, "random_hash": True, "naming_mode": "slug"
+        "label": "⚖️ Balanced (Full Scrub + Word Slug - Shows in Today's Gallery)",
+        "strip_exif": True, "strip_icc": True, "clamp_time": False, "clamp_mode": "day_fuzz",
+        "random_hash": True, "naming_mode": "slug"
     },
     "metadata_only": {
         "label": "🏷️ Metadata Strip Only (Keep Original Name & Current Time)",
-        "strip_exif": True, "strip_icc": True, "clamp_time": False, "random_hash": False, "naming_mode": "disabled"
+        "strip_exif": True, "strip_icc": True, "clamp_time": False, "random_hash": False,
+        "naming_mode": "disabled"
     },
     "timestomp_only": {
         "label": "⏱️ Timestomp Only (Clamp Date to 2020, Keep Filename & EXIF)",
-        "strip_exif": False, "strip_icc": False, "clamp_time": True, "random_hash": False, "naming_mode": "disabled"
+        "strip_exif": False, "strip_icc": False, "clamp_time": True, "clamp_mode": "static_2020",
+        "random_hash": False, "naming_mode": "disabled"
     },
     "custom": {
         "label": "🛠️ Custom Tailored Rules (Manual Feature Toggles)",
@@ -237,6 +247,12 @@ def load_config():
                     elif isinstance(item, dict):
                         v2.append(item)
                 data["folders_v2"] = v2
+
+            # Ensure all sub-keys exist in each folder profile
+            for f in data.get("folders_v2", []):
+                for k, v in DEFAULT_FOLDER_PROFILE.items():
+                    if k not in f:
+                        f[k] = v
 
             return {**DEFAULT_CONFIG, **data}
         except Exception:
@@ -283,10 +299,11 @@ def log_event(category: str, msg: str):
 
 
 # ==============================================================================
-# KEYBOARD INPUT READER (ANSI + VIM/WASD KEYS)
+# KEYBOARD INPUT READER (BUFFERED ANSI WITH TOUCH-LATENCY SHIELD)
 # ==============================================================================
 
 def read_single_key():
+    """Captures ANSI escape codes atomically using os.read to prevent dropped bytes."""
     if platform.system() == "Windows":
         import msvcrt
         ch = msvcrt.getch()
@@ -304,6 +321,10 @@ def read_single_key():
             return "UP"
         elif ch in (b's', b'S', b'j', b'J'):
             return "DOWN"
+        elif ch in (b'a', b'A', b'h', b'H'):
+            return "LEFT"
+        elif ch in (b'd', b'D', b'l', b'L'):
+            return "RIGHT"
         return ch.decode('latin1', errors='ignore')
     else:
         import termios, tty
@@ -311,31 +332,43 @@ def read_single_key():
         old = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                r, _, _ = select.select([sys.stdin], [], [], 0.20)
-                if r:
-                    ch2 = sys.stdin.read(1)
-                    if ch2 in ('[', 'O'):
-                        r2, _, _ = select.select([sys.stdin], [], [], 0.20)
-                        if r2:
-                            ch3 = sys.stdin.read(1)
-                            if ch3 in ('A', 'k'): return "UP"
-                            elif ch3 in ('B', 'j'): return "DOWN"
-                            elif ch3 == 'C': return "RIGHT"
-                            elif ch3 == 'D': return "LEFT"
-                return "ESC"
-            elif ch in ('\r', '\n', ' '):
-                return "ENTER"
-            elif ch in ('k', 'K', 'w', 'W'):
+            raw = os.read(fd, 32)
+            if not raw:
+                return ""
+
+            # Standard and application-cursor ANSI arrow codes
+            if raw in (b'\x1b[A', b'\x1bOA', b'\x1b[a'):
                 return "UP"
-            elif ch in ('j', 'J', 's', 'S'):
+            elif raw in (b'\x1b[B', b'\x1bOB', b'\x1b[b'):
                 return "DOWN"
-            elif ch in ('q', 'Q'):
+            elif raw in (b'\x1b[C', b'\x1bOC', b'\x1b[c'):
+                return "RIGHT"
+            elif raw in (b'\x1b[D', b'\x1bOD', b'\x1b[d'):
+                return "LEFT"
+            elif raw.startswith(b'\x1b'):
+                if b'A' in raw: return "UP"
+                if b'B' in raw: return "DOWN"
+                if b'C' in raw: return "RIGHT"
+                if b'D' in raw: return "LEFT"
+                return "ESC"
+            elif raw in (b'\r', b'\n', b' '):
+                return "ENTER"
+            elif raw in (b'k', b'K', b'w', b'W'):
+                return "UP"
+            elif raw in (b'j', b'J', b's', b'S'):
+                return "DOWN"
+            elif raw in (b'h', b'H', b'a', b'A'):
+                return "LEFT"
+            elif raw in (b'l', b'L', b'd', b'D'):
+                return "RIGHT"
+            elif raw in (b'q', b'Q'):
                 return "QUIT"
-            elif ch == '\x03':
+            elif raw == b'\x03':  # Ctrl+C
                 raise KeyboardInterrupt
-            return ch
+            try:
+                return raw.decode('utf-8', errors='ignore')
+            except Exception:
+                return ""
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -344,11 +377,7 @@ def read_single_key():
 # UNIVERSAL ARROW-NAVIGATED MENU ENGINE
 # ==============================================================================
 
-def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0):
-    """
-    Renders an interactive menu navigated purely via arrow keys, with hotkeys preserved.
-    items: list of tuples: (hotkey_str, display_label, action_identifier)
-    """
+def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0, is_main=False):
     cursor = default_idx
     total = len(items)
     w = get_ui_width()
@@ -365,7 +394,11 @@ def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0):
             else:
                 print(f"{CLR_BORDER}│{NC}    {CLR_GRAY}[{hotkey}] {label}{NC}")
         print(f"{CLR_BORDER}╰{'─' * (w - 2)}╯{NC}")
-        print(f"  {CLR_BLUE}Navigate: [↑/↓ or W/S] · Select: [Enter/Space] · Back: [Q]{NC}")
+
+        if is_main:
+            print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Open: [Enter/Space] · Exit: [0]{NC}")
+        else:
+            print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Select: [Enter/Space] · Back: [Q or Left]{NC}")
 
         key = read_single_key()
         if key == "UP":
@@ -375,10 +408,14 @@ def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0):
         elif key in ("ENTER", "RIGHT"):
             return items[cursor][2]
         elif key in ("QUIT", "ESC", "LEFT"):
-            for hk, _, act in items:
-                if hk in ("0", "q", "Q", "Back"):
-                    return act
-            return None
+            if is_main:
+                # Shield: Never exit main menu accidentally on Arrow Left or ESC!
+                continue
+            else:
+                for hk, _, act in items:
+                    if hk in ("0", "q", "Q", "Back", "back"):
+                        return act
+                return "back"
         else:
             for idx, (hk, _, act) in enumerate(items):
                 if key.lower() == str(hk).lower():
@@ -654,7 +691,7 @@ def create_synthetic_png(target_path: Path):
 
 
 # ==============================================================================
-# DICETIME WORDLISTS & NAMING ENGINE
+# CUSTOM NAMING ENGINE & DICETIME WORDLISTS
 # ==============================================================================
 
 SLUG_ADJECTIVES = (
@@ -679,22 +716,65 @@ def generate_sanitized_filename(filepath: Path, rules: dict) -> str:
     ext = filepath.suffix.lower()
     now = time.localtime()
     date_stamp = time.strftime("%Y%m%d", now)
+    suffix = rules.get("suffix", "")
+    casing = rules.get("casing", "lower")
 
     if mode == "disabled" or not rules.get("random_hash", True):
         return filepath.name
     elif mode == "slug":
-        return f"{random.choice(SLUG_ADJECTIVES)}-{random.choice(SLUG_NOUNS)}-{random.randint(10, 99)}{ext}"
+        adj = random.choice(SLUG_ADJECTIVES)
+        noun = random.choice(SLUG_NOUNS)
+        num = random.randint(10, 99)
+        base = f"{adj}-{noun}-{num}"
+        if suffix: base += f"_{suffix}"
+        res = f"{base}{ext}"
     elif mode == "decoy_wa":
-        return f"IMG-{date_stamp}-WA{random.randint(1, 9999):04d}{ext}"
+        seq = random.randint(1, 9999)
+        res = f"IMG-{date_stamp}-WA{seq:04d}{ext}"
     elif mode == "decoy_dcim":
-        return f"DSC_{random.randint(1000, 9999):04d}{ext}"
+        seq = random.randint(1000, 9999)
+        res = f"DSC_{seq:04d}{ext}"
     elif mode == "decoy_reddit":
         ts = f"{random.randint(0,23):02d}{random.randint(0,59):02d}{random.randint(0,59):02d}"
-        return f"RDT_{date_stamp}_{ts}{ext}"
+        res = f"RDT_{date_stamp}_{ts}{ext}"
     else:
         prefix = rules.get("prefix", "img_")
         h_len = int(rules.get("hash_len", 12))
-        return f"{prefix}{uuid.uuid4().hex[:h_len]}{ext}"
+        token = uuid.uuid4().hex[:h_len]
+        base = f"{prefix}{token}"
+        if suffix: base += f"_{suffix}"
+        res = f"{base}{ext}"
+
+    return res.upper() if casing == "upper" else res.lower()
+
+
+# ==============================================================================
+# ADVANCED ANTI-FORENSIC TIMESTOMP CLAMPING ENGINE
+# ==============================================================================
+
+def compute_clamp_epoch(rules: dict) -> float:
+    """Computes targeted epoch timestamp based on user clamping mode."""
+    mode = rules.get("clamp_mode", "static_2020")
+    if mode == "static_2020":
+        return 1577836800.0  # 2020-01-01 00:00:00 UTC
+    elif mode == "epoch_1970":
+        return 0.0          # 1970-01-01 00:00:00 UTC
+    elif mode == "day_fuzz":
+        # Clamps to midnight today: shows in Today's feed, but masks hour/minute/second!
+        now = time.localtime()
+        midnight = time.struct_time((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, now.tm_wday, now.tm_yday, now.tm_isdst))
+        return time.mktime(midnight)
+    elif mode == "random_fuzz":
+        # Random timestamp between 2020 and 2022 to prevent forensic clustering
+        return float(random.randint(1577836800, 1672531199))
+    elif mode == "custom":
+        custom_str = rules.get("clamp_custom_date", "2020-01-01 00:00:00")
+        try:
+            st = time.strptime(custom_str, "%Y-%m-%d %H:%M:%S")
+            return time.mktime(st)
+        except Exception:
+            return 1577836800.0
+    return 1577836800.0
 
 
 # ==============================================================================
@@ -879,12 +959,15 @@ def sanitization_worker():
                     log_event("ERROR", f"Rename error: {e}")
                     target_path = filepath
 
-            # 4. Granular Anti-Forensic Timestamp Clamping
+            # 4. Advanced Anti-Forensic Timestamp Clamping
             if rules.get("clamp_time", True):
                 try:
-                    epoch_2020 = 1577836800.0
-                    os.utime(target_path, (epoch_2020, epoch_2020))
-                    log_event("TIMESTOMP", "Clamped mtime/atime to 2020-01-01 00:00:00")
+                    target_epoch = compute_clamp_epoch(rules)
+                    curr_stat = target_path.stat()
+                    atime = target_epoch if rules.get("clamp_atime", True) else curr_stat.st_atime
+                    mtime = target_epoch if rules.get("clamp_mtime", True) else curr_stat.st_mtime
+                    os.utime(target_path, (atime, mtime))
+                    log_event("TIMESTOMP", f"Clamped ({rules.get('clamp_mode', 'static_2020')}): mtime={time.ctime(mtime)}")
                 except OSError:
                     pass
 
@@ -972,7 +1055,6 @@ def draw_main_header():
     folders = cfg.get("folders_v2", [])
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
-    # Banner Header
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
     print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}")
     print(f"{CLR_CYAN}│{NC}  {DIM}Zero-Footprint Anti-Forensics & Granular Shield{NC}")
@@ -980,10 +1062,9 @@ def draw_main_header():
 
     if UPDATE_AVAILABLE:
         print(f"{CLR_AMBER}╭─ {BOLD}🔔 UPDATE AVAILABLE{NC} {CLR_AMBER}{'─' * max(0, w - 24)}╮{NC}")
-        print(f"{CLR_AMBER}│{NC}  Commit {BOLD}{REMOTE_COMMIT_SHORT}{NC} ready · Press [10] to install")
+        print(f"{CLR_AMBER}│{NC}  Commit {BOLD}{REMOTE_COMMIT_SHORT}{NC} ready · Select Option [11] to install")
         print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
 
-    # System Status Card
     pipe_status = f"{CLR_GREEN}Active (-stay_open){NC}"
     vault_status = f"{CLR_GREEN}ON (AES Encrypted){NC}" if cfg.get("enable_backup") else f"{CLR_GRAY}OFF{NC}"
 
@@ -993,7 +1074,6 @@ def draw_main_header():
     print(f"{CLR_BLUE}│{NC} Backup Vault : {vault_status}  {CLR_GRAY}(~/.shotclean/vault){NC}")
     print(f"{CLR_BLUE}╰{'─' * (w - 2)}╯{NC}")
 
-    # Monitored Folders Summary Card
     print(f"{CLR_AMBER}╭─ {BOLD}MONITORED FOLDERS ({len(folders)}){NC} {CLR_AMBER}{'─' * max(0, w - 26)}╮{NC}")
     if not folders:
         print(f"{CLR_AMBER}│{NC}  {CLR_RED}No folders registered! Add one below.{NC}")
@@ -1008,7 +1088,7 @@ def draw_main_header():
 
 
 # ==============================================================================
-# SUBMENU 1: MANAGE FOLDERS & RULES (ARROW-NAVIGATED)
+# SUBMENU 1: MANAGE FOLDERS & RULES
 # ==============================================================================
 
 def tool_manage_folders():
@@ -1024,7 +1104,7 @@ def tool_manage_folders():
             print(f"{CLR_CYAN}│{NC}  • {BOLD}GHOST{NC}     : Wipes EXIF/ICC + 2020 clamp + random hash.")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}BALANCED{NC}  : Wipes EXIF/ICC + readable slug (shows Today).")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}METADATA{NC}  : Wipes EXIF/ICC only (keeps filename intact).")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}TIMESTOMP{NC} : Clamps time to 2020 only (keeps EXIF & name).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}TIMESTOMP{NC} : Clamps time only (keeps EXIF & filename).")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
             print(f"  {BOLD}Registered Directories ({len(folders)}):{NC}")
             for idx, f in enumerate(folders, 1):
@@ -1108,7 +1188,7 @@ def configure_individual_folder(index: int):
             print(f"{CLR_CYAN}│{NC}  Target: {CLR_WHITE}{truncate_middle(f['path'], w - 14)}{NC}")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}Active Policy{NC} : {CLR_AMBER}{f.get('profile', 'custom').upper()}{NC}")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF Strip{NC}    : {'ON' if f.get('strip_exif') else 'OFF'}  ·  {BOLD}ICC Strip{NC}: {'ON' if f.get('strip_icc') else 'OFF'}")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Time Clamp{NC}    : {'ON (2020-01-01)' if f.get('clamp_time') else 'OFF (Today)'}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Time Clamp{NC}    : {'ON (' + f.get('clamp_mode', 'static_2020') + ')' if f.get('clamp_time') else 'OFF'}")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}Naming Mode{NC}   : {f.get('naming_mode', 'hash')} (Prefix: '{f.get('prefix', 'img_')}')")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
@@ -1116,7 +1196,7 @@ def configure_individual_folder(index: int):
             ("1", "🛡️  Apply Policy Preset (Ghost / Balanced / Metadata / Timestomp)", "preset"),
             ("2", f"🏷️  Toggle EXIF Metadata Scrubbing [{'ON' if f.get('strip_exif') else 'OFF'}]", "toggle_exif"),
             ("3", f"🎨 Toggle Display ICC Profile Removal [{'ON' if f.get('strip_icc') else 'OFF'}]", "toggle_icc"),
-            ("4", f"⏱️  Toggle Timestamp Clamping [{'2020-01-01' if f.get('clamp_time') else 'Today'}]", "toggle_time"),
+            ("4", f"⏱️  Toggle Timestamp Clamping [{'ON' if f.get('clamp_time') else 'OFF'}]", "toggle_time"),
             ("5", f"🎲 Change Naming Camouflage Style [{f.get('naming_mode', 'hash')}]", "naming_style"),
             ("6", "🗑️  Delete this folder from watchlist", "delete"),
             ("0", "🔙 Done / Save & Return", "back"),
@@ -1192,7 +1272,7 @@ def configure_individual_folder(index: int):
 
 
 # ==============================================================================
-# SUBMENU 2: NAMING & CAMOUFLAGE STUDIO (ARROW-NAVIGATED)
+# SUBMENU 2: NAMING & CAMOUFLAGE STUDIO
 # ==============================================================================
 
 def tool_manage_naming():
@@ -1215,16 +1295,22 @@ def tool_manage_naming():
             print(f"{CLR_CYAN}│{NC}  Sample Result: {CLR_GREEN}{BOLD}{sample_preview}{NC}")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
+        pfx = target_folder.get('prefix', 'img_')
+        sfx = target_folder.get('suffix', '')
+        casing = target_folder.get('casing', 'lower')
+
         menu_items = [
             ("1", f"🎭 Switch Naming Style [{mode.upper()}]", "style"),
-            ("2", f"✏️  Configure Prefix ['{target_folder.get('prefix', 'img_')}']", "prefix"),
-            ("3", f"🔢 Set Hash Token Length [{target_folder.get('hash_len', 12)} chars]", "length"),
-            ("4", "🎲 Roll 3 Test Previews", "preview"),
-            ("5", "🚀 Apply this style to ALL registered folders", "apply_all"),
+            ("2", f"✏️  Configure Prefix ['{pfx}']", "prefix"),
+            ("3", f"🏷️  Configure Suffix ['{sfx or '(None)'}']", "suffix"),
+            ("4", f"🔠 Toggle Casing Formatter [{casing.upper()}]", "casing"),
+            ("5", f"🔢 Set Hash Token Length [{target_folder.get('hash_len', 12)} chars]", "length"),
+            ("6", "🎲 Roll 3 Test Previews", "preview"),
+            ("7", "🚀 Apply this naming style to ALL registered folders", "apply_all"),
             ("0", "🔙 Back to Main Menu", "back"),
         ]
 
-        action = run_arrow_menu(header_card, menu_items, title="NAMING & CAMOUFLAGE")
+        action = run_arrow_menu(header_card, menu_items, title="NAMING & CAMOUFLAGE STUDIO")
 
         if action == "style":
             def style_header():
@@ -1246,13 +1332,27 @@ def tool_manage_naming():
 
         elif action == "prefix":
             os.system("cls" if os.name == "nt" else "clear")
-            print(f"\n  Current Prefix: '{target_folder.get('prefix', 'img_')}'")
+            print(f"\n  Current Prefix: '{pfx}'")
             new_pfx = input("  Enter new prefix (e.g. 'shot_', 'p_', or blank): ").strip()
             sanitized = "".join(ch for ch in new_pfx if ch.isalnum() or ch in ("_", "-"))
             target_folder["prefix"] = sanitized
             save_config(cfg)
             print(f"  {CLR_GREEN}✔ Prefix updated to: '{sanitized}'{NC}")
             time.sleep(0.8)
+
+        elif action == "suffix":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"\n  Current Suffix: '{sfx}'")
+            new_sfx = input("  Enter new suffix (e.g. 'clean', 'vault', or blank): ").strip()
+            sanitized = "".join(ch for ch in new_sfx if ch.isalnum() or ch in ("_", "-"))
+            target_folder["suffix"] = sanitized
+            save_config(cfg)
+            print(f"  {CLR_GREEN}✔ Suffix updated to: '{sanitized}'{NC}")
+            time.sleep(0.8)
+
+        elif action == "casing":
+            target_folder["casing"] = "upper" if casing == "lower" else "lower"
+            save_config(cfg)
 
         elif action == "length":
             def len_header():
@@ -1280,6 +1380,8 @@ def tool_manage_naming():
             for f in folders:
                 f["naming_mode"] = target_folder.get("naming_mode", "hash")
                 f["prefix"] = target_folder.get("prefix", "img_")
+                f["suffix"] = target_folder.get("suffix", "")
+                f["casing"] = target_folder.get("casing", "lower")
                 f["hash_len"] = target_folder.get("hash_len", 12)
                 f["random_hash"] = target_folder.get("random_hash", True)
             save_config(cfg); DaemonManager.restart()
@@ -1291,7 +1393,111 @@ def tool_manage_naming():
 
 
 # ==============================================================================
-# SUBMENU 3: ENCRYPTED SAFETY VAULT (ARROW-NAVIGATED)
+# SUBMENU 3: TIMESTOMP & CLAMPING STUDIO (CUSTOMIZE DATES)
+# ==============================================================================
+
+def tool_manage_clamping():
+    while True:
+        cfg = load_config()
+        w = get_ui_width()
+        folders = cfg.get("folders_v2", [])
+        target_folder = folders[0] if folders else DEFAULT_FOLDER_PROFILE
+
+        mode = target_folder.get("clamp_mode", "static_2020")
+        custom_date = target_folder.get("clamp_custom_date", "2020-01-01 00:00:00")
+        clamp_enabled = target_folder.get("clamp_time", True)
+
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW ANTI-FORENSIC TIMESTOMPING WORKS{NC} {CLR_CYAN}{'─' * max(0, w - 44)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Filesystem table entries leak creation and access minutes.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Static 2020{NC}   : Freezes time to 2020-01-01 (breaks all timestamps).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Day Fuzz{NC}      : Stamps to Today at 00:00:00 (Shows in Today's Gallery).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Random Fuzz{NC}   : Random dates (2020-2022) to avoid batch clustering.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Custom Date{NC}   : Set any exact historical date you prefer.")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        mode_labels = {
+            "static_2020": "Static 2020-01-01 00:00:00 (Standard)",
+            "day_fuzz": "Today's Midnight (Shows in Today's Gallery)",
+            "random_fuzz": "Random Past Date (2020-2022 Fuzzing)",
+            "epoch_1970": "Unix Epoch (1970-01-01 00:00:00)",
+            "custom": f"Custom: {custom_date}",
+        }
+
+        menu_items = [
+            ("1", f"⏱️  Toggle Timestamp Clamping [{'🟢 ON' if clamp_enabled else '⚪ OFF'}]", "toggle_clamp"),
+            ("2", f"📅 Select Clamp Target Mode [{mode_labels.get(mode, mode)}]", "select_mode"),
+            ("3", f"✍️  Set Custom Date/Time String ['{custom_date}']", "set_custom"),
+            ("4", f"🏷️  Clamp Modification Time (mtime) [{'🟢 ON' if target_folder.get('clamp_mtime', True) else '⚪ OFF'}]", "toggle_mtime"),
+            ("5", f"👁️  Clamp Access Time (atime) [{'🟢 ON' if target_folder.get('clamp_atime', True) else '⚪ OFF'}]", "toggle_atime"),
+            ("6", "🚀 Apply this clamping rule to ALL registered folders", "apply_all"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
+
+        action = run_arrow_menu(header_card, menu_items, title="TIMESTOMP & CLAMPING STUDIO")
+
+        if action == "toggle_clamp":
+            target_folder["clamp_time"] = not target_folder.get("clamp_time", True)
+            save_config(cfg); DaemonManager.restart()
+
+        elif action == "select_mode":
+            def mode_header():
+                print(f"{CLR_CYAN}=== Select Clamping Target Strategy ==={NC}\n")
+            m_items = [
+                ("1", "🛡️  Static 2020-01-01 00:00:00 (Maximum Forensic Cloak)", "static_2020"),
+                ("2", "☀️  Today at 00:00:00 (Fuzzes Seconds, Shows in Today's Gallery)", "day_fuzz"),
+                ("3", "🎲 Random Past Date (2020-2022, Prevents Batch Clustering)", "random_fuzz"),
+                ("4", "🕰️  Unix Epoch Zero (1970-01-01 00:00:00)", "epoch_1970"),
+                ("5", f"✏️  Custom User Date ({custom_date})", "custom"),
+                ("0", "🔙 Cancel", "back")
+            ]
+            chosen_m = run_arrow_menu(mode_header, m_items, title="CLAMPING TARGET")
+            if chosen_m and chosen_m != "back":
+                target_folder["clamp_mode"] = chosen_m
+                target_folder["clamp_time"] = True
+                save_config(cfg); DaemonManager.restart()
+
+        elif action == "set_custom":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"\n  Current Custom Date: '{custom_date}'")
+            print("  Enter custom timestamp format: YYYY-MM-DD HH:MM:SS")
+            inp = input("  Target Time > ").strip()
+            try:
+                time.strptime(inp, "%Y-%m-%d %H:%M:%S")
+                target_folder["clamp_custom_date"] = inp
+                target_folder["clamp_mode"] = "custom"
+                target_folder["clamp_time"] = True
+                save_config(cfg)
+                print(f"  {CLR_GREEN}✔ Custom target date updated!{NC}")
+            except ValueError:
+                print(f"  {CLR_RED}✖ Invalid format. Example: 2018-05-20 14:30:00{NC}")
+            time.sleep(1)
+
+        elif action == "toggle_mtime":
+            target_folder["clamp_mtime"] = not target_folder.get("clamp_mtime", True)
+            save_config(cfg)
+
+        elif action == "toggle_atime":
+            target_folder["clamp_atime"] = not target_folder.get("clamp_atime", True)
+            save_config(cfg)
+
+        elif action == "apply_all":
+            for f in folders:
+                f["clamp_time"] = target_folder.get("clamp_time", True)
+                f["clamp_mode"] = target_folder.get("clamp_mode", "static_2020")
+                f["clamp_custom_date"] = target_folder.get("clamp_custom_date", "2020-01-01 00:00:00")
+                f["clamp_mtime"] = target_folder.get("clamp_mtime", True)
+                f["clamp_atime"] = target_folder.get("clamp_atime", True)
+            save_config(cfg); DaemonManager.restart()
+            print(f"\n  {CLR_GREEN}✔ Applied to all {len(folders)} folders!{NC}")
+            time.sleep(1)
+
+        elif action in ("back", None):
+            break
+
+
+# ==============================================================================
+# SUBMENU 4: ENCRYPTED SAFETY VAULT
 # ==============================================================================
 
 def tool_manage_vault():
@@ -1352,7 +1558,7 @@ def tool_manage_vault():
 
 
 # ==============================================================================
-# SUBMENU 4: PRIVACY CANARY AUDIT (ARROW-NAVIGATED)
+# SUBMENU 5: PRIVACY CANARY AUDIT
 # ==============================================================================
 
 def tool_privacy_canary():
@@ -1419,7 +1625,7 @@ def tool_privacy_canary():
 
 
 # ==============================================================================
-# SUBMENU 5: ENGINE DIAGNOSTICS (ARROW-NAVIGATED)
+# SUBMENU 6: ENGINE DIAGNOSTICS
 # ==============================================================================
 
 def tool_engine_diagnostics():
@@ -1464,7 +1670,7 @@ def tool_engine_diagnostics():
 
 
 # ==============================================================================
-# SUBMENU 6: FEATURE MANUAL (ARROW-NAVIGATED)
+# SUBMENU 7: FEATURE MANUAL
 # ==============================================================================
 
 def tool_feature_guide():
@@ -1479,7 +1685,7 @@ def tool_feature_guide():
             ("1", "🏷️  EXIF / XMP / IPTC Metadata Stripping", "exif"),
             ("2", "🎨 Display ICC Color Profile Removal", "icc"),
             ("3", "🎲 Decoy Presets & Diceware Word Slugs", "naming"),
-            ("4", "⏱️  Anti-Forensic Timestamp Clamping (Timestomp)", "time"),
+            ("4", "⏱️  Anti-Forensic Timestamp Clamping & Day-Fuzzing", "time"),
             ("5", "🔐 Encrypted Safety Vault (AES-Authenticated)", "vault"),
             ("6", "📁 Granular Per-Folder Rules Explanation", "folders"),
             ("0", "🔙 Back to Main Menu", "back"),
@@ -1504,9 +1710,9 @@ def tool_feature_guide():
             input("\n  Press [Enter] to return...")
         elif action == "time":
             os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING (TIMESTOMP) ==={NC}\n")
-            print("  Forces filesystem modification dates to 2020-01-01 to eliminate temporal correlation.")
-            print("  Tip: When enabled, gallery apps place screenshots into January 2020!")
+            print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING & DAY-FUZZING ==={NC}\n")
+            print("  Static 2020: Forces modification dates to 2020-01-01 to eliminate temporal correlation.")
+            print("  Day-Fuzz: Stamps photos to Today at 00:00:00 so they stay in Today's Gallery feed while masking seconds!")
             input("\n  Press [Enter] to return...")
         elif action == "vault":
             os.system("cls" if os.name == "nt" else "clear")
@@ -1646,7 +1852,11 @@ def tool_bulk_clean():
 
         if rules.get("clamp_time", True):
             try:
-                os.utime(img, (1577836800.0, 1577836800.0))
+                target_epoch = compute_clamp_epoch(rules)
+                curr_stat = img.stat()
+                atime = target_epoch if rules.get("clamp_atime", True) else curr_stat.st_atime
+                mtime = target_epoch if rules.get("clamp_mtime", True) else curr_stat.st_mtime
+                os.utime(img, (atime, mtime))
             except OSError:
                 pass
 
@@ -1688,21 +1898,22 @@ def main():
         ("1", "⚡ Toggle Daemon (Start / Halt)", "toggle"),
         ("2", "📁 Manage Folders & Granular Rules", "folders"),
         ("3", "🎲 Naming & Camouflage Studio", "naming"),
-        ("4", "🔐 Safety Backup Vault", "vault"),
-        ("5", "🔍 Live EXIF & Metadata Audit", "audit"),
-        ("6", "🧹 Bulk Folder Scrubber", "bulk"),
-        ("7", "📜 Live Event Stream Logs", "logs"),
-        ("8", "🐤 Privacy Canary Tester", "canary"),
-        ("9", "🔬 Engine Diagnostics", "diagnostics"),
-        ("10", "🔄 Check for Updates", "update"),
-        ("11", "📖 Privacy Field Manual", "manual"),
+        ("4", "⏱️  Timestomp & Clamping Studio", "clamping"),
+        ("5", "🔐 Safety Backup Vault", "vault"),
+        ("6", "🔍 Live EXIF & Metadata Audit", "audit"),
+        ("7", "🧹 Bulk Folder Scrubber", "bulk"),
+        ("8", "📜 Live Event Stream Logs", "logs"),
+        ("9", "🐤 Privacy Canary Tester", "canary"),
+        ("10", "🔬 Engine Diagnostics", "diagnostics"),
+        ("11", "🔄 Check for Updates", "update"),
+        ("12", "📖 Privacy Field Manual", "manual"),
         ("0", "🚪 Exit Suite", "exit"),
     ]
 
     cursor = 0
     try:
         while True:
-            choice = run_arrow_menu(draw_main_header, main_menu_items, title="COMMAND CENTER", default_idx=cursor)
+            choice = run_arrow_menu(draw_main_header, main_menu_items, title="COMMAND CENTER", default_idx=cursor, is_main=True)
 
             if choice == "toggle":
                 DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
@@ -1713,31 +1924,34 @@ def main():
             elif choice == "naming":
                 tool_manage_naming()
                 cursor = 2
+            elif choice == "clamping":
+                tool_manage_clamping()
+                cursor = 3
             elif choice == "vault":
                 tool_manage_vault()
-                cursor = 3
+                cursor = 4
             elif choice == "audit":
                 tool_live_audit()
-                cursor = 4
+                cursor = 5
             elif choice == "bulk":
                 tool_bulk_clean()
-                cursor = 5
+                cursor = 6
             elif choice == "logs":
                 tool_live_logs()
-                cursor = 6
+                cursor = 7
             elif choice == "canary":
                 tool_privacy_canary()
-                cursor = 7
+                cursor = 8
             elif choice == "diagnostics":
                 tool_engine_diagnostics()
-                cursor = 8
+                cursor = 9
             elif choice == "update":
                 tool_manual_check_updates()
-                cursor = 9
+                cursor = 10
             elif choice == "manual":
                 tool_feature_guide()
-                cursor = 10
-            elif choice in ("exit", "back", None):
+                cursor = 11
+            elif choice == "exit":
                 break
 
     except (KeyboardInterrupt, EOFError):
