@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v4.6.0
+ShotClean Universal Studio v4.7.0
 Cross-platform metadata stripper, anti-forensics suite & automated privacy shield.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -31,7 +31,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB WEB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "4.6.0"
+CURRENT_VERSION = "4.7.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -168,10 +168,10 @@ DEFAULT_CONFIG = {
     "strip_icc": True,
     "random_hash": True,
     "prefix": "img_",
+    "hash_len": 12,
     "clamp_time": True,
     "enable_backup": False,
     "encrypt_vault": True,
-    "verbose_debug": True,
 }
 
 
@@ -193,12 +193,7 @@ def save_config(cfg):
 CONFIG = load_config()
 
 
-# ==============================================================================
-# ADVANCED SUBSYSTEM LOGGING & EVENT TRACING
-# ==============================================================================
-
 def log_event(category: str, msg: str):
-    """Categorized event logging with automatic log rotation."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     formatted = f"[{timestamp}] [{category.upper():<7}] {msg}"
     try:
@@ -348,11 +343,10 @@ def interactive_folder_browser(start_dir: Path = None) -> Path:
 
 
 # ==============================================================================
-# ROBUST EXIFTOOL DAEMON (DEADLOCK-FREE WITH TIMEOUT WATCHDOG)
+# ROBUST EXIFTOOL DAEMON (-stay_open)
 # ==============================================================================
 
 class ExifToolDaemon:
-    """Non-blocking, auto-recovering ExifTool daemon with 4.0s hard timeout."""
     def __init__(self):
         self.proc = None
         self.lock = threading.Lock()
@@ -362,7 +356,6 @@ class ExifToolDaemon:
         if not shutil.which("exiftool"):
             return
         try:
-            # Important: stderr=subprocess.DEVNULL stops pipe-buffer deadlocks on Termux
             self.proc = subprocess.Popen(
                 ["exiftool", "-stay_open", "True", "-@", "-"],
                 stdin=subprocess.PIPE,
@@ -393,7 +386,6 @@ class ExifToolDaemon:
                 self._start()
 
             if not self.proc:
-                # Direct fallback execution if daemon unavailable
                 try:
                     res = subprocess.run(
                         ["exiftool"] + list(args),
@@ -413,14 +405,12 @@ class ExifToolDaemon:
                 start_wait = time.time()
 
                 while True:
-                    # Non-blocking poll using select on POSIX
                     if platform.system() != "Windows":
                         remaining = max(0.05, timeout - (time.time() - start_wait))
                         r, _, _ = select.select([self.proc.stdout], [], [], remaining)
                         if not r:
                             log_event("WARN", "ExifTool pipe response timed out! Auto-recycling engine...")
                             self._restart()
-                            # Run fallback once directly
                             res = subprocess.run(
                                 ["exiftool"] + list(args),
                                 capture_output=True, text=True, timeout=3.0
@@ -625,7 +615,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # ==============================================================================
-# SANITIZATION WORKER QUEUE WITH SUB-MILLISECOND TRACING
+# SANITIZATION WORKER QUEUE
 # ==============================================================================
 
 WORK_QUEUE = queue.Queue()
@@ -662,7 +652,10 @@ def sanitization_worker():
             cfg = load_config()
             prefix = cfg.get("prefix", "img_")
 
-            if not filepath.exists() or filepath.name.startswith(".") or filepath.name.startswith(prefix):
+            # Ignore already cleaned files matching current prefix
+            if not filepath.exists() or filepath.name.startswith("."):
+                continue
+            if prefix and filepath.name.startswith(prefix):
                 continue
 
             log_event("PROBE", f"Interception triggered: {filepath.name}. Testing write lock...")
@@ -706,9 +699,10 @@ def sanitization_worker():
 
             target_path = filepath
 
-            # 3. Hash Renaming
+            # 3. Hash Renaming with Custom Prefix & Length
             if cfg.get("random_hash", True):
-                rand_token = uuid.uuid4().hex[:12]
+                hash_len = int(cfg.get("hash_len", 12))
+                rand_token = uuid.uuid4().hex[:hash_len]
                 new_name = f"{prefix}{rand_token}{filepath.suffix.lower()}"
                 target_path = filepath.parent / new_name
                 try:
@@ -844,7 +838,7 @@ def draw_dashboard():
         [
             f"OS Env  : {BOLD}{SystemDoctor.get_os_string()}{NC}",
             f"Engine  : {status_text}  {CLR_GRAY}(Session scrubbed: {SESSION_CLEANED_COUNT}){NC}",
-            f"Queue   : {WORK_QUEUE.qsize()} pending  ·  Pipe: {CLR_GREEN}Deadlock-Protected{NC}",
+            f"Queue   : {WORK_QUEUE.qsize()} pending  ·  Pipe: {CLR_GREEN}Active (-stay_open){NC}",
             f"Watched : {BOLD}{folder_count} folder(s) registered{NC}",
         ],
         CLR_BLUE,
@@ -854,12 +848,16 @@ def draw_dashboard():
     if not cfg.get("enable_backup", False):
         vault_status = "[ ⚪ OFF ]"
 
+    pfx_str = cfg.get('prefix', 'img_')
+    if not pfx_str: pfx_str = "(None)"
+    sample_hash = f"{pfx_str}{'a1b2c3d4'[:cfg.get('hash_len', 12)]}.png"
+
     draw_card(
         "PRIVACY SHIELD",
         [
-            f"EXIF Scrub : {pill(cfg['strip_exif'])}  Hash Rename : {pill(cfg['random_hash'])}",
-            f"ICC Profile: {pill(cfg['strip_icc'])}  Time Clamp  : {pill(cfg['clamp_time'])}",
-            f"Vault Store: {vault_status}  Backup State: {pill(cfg['enable_backup'])}",
+            f"EXIF Scrub : {pill(cfg['strip_exif'])}  ICC Profile : {pill(cfg['strip_icc'])}",
+            f"Time Clamp : {pill(cfg['clamp_time'])}  Vault Store : {vault_status}",
+            f"File Rename: {pill(cfg['random_hash'])}  Prefix: {CLR_CYAN}{pfx_str}{NC} ({sample_hash})",
         ],
         CLR_AMBER,
     )
@@ -869,13 +867,13 @@ def draw_dashboard():
         [
             f"{CLR_CYAN}[1]{NC} ⚡ Toggle Daemon ({'Halt' if DaemonManager.is_running else 'Start'})",
             f"{CLR_CYAN}[2]{NC} 📁 Manage Folders {CLR_GREEN}(Arrow Navigator){NC}",
-            f"{CLR_CYAN}[3]{NC} 🎭 Privacy Profiles",
-            f"{CLR_CYAN}[4]{NC} 🏷️  Toggle EXIF       {CLR_CYAN}[5]{NC} 🎨 Toggle ICC Profile",
-            f"{CLR_CYAN}[6]{NC} 🎲 Toggle Hash Rename {CLR_CYAN}[7]{NC} ⏱️  Toggle Time Clamp",
-            f"{CLR_CYAN}[8]{NC} 🔐 Manage Vault       {CLR_CYAN}[9]{NC} 🔍 Live EXIF Audit",
-            f"{CLR_CYAN}[10]{NC}🧹 Bulk Clean Folder   {CLR_CYAN}[11]{NC}📜 Live Stream Logs",
-            f"{CLR_CYAN}[12]{NC}🐤 Privacy Canary Tool {CLR_CYAN}[13]{NC}🩺 System Doctor",
-            f"{CLR_CYAN}[14]{NC}🔄 Check for Updates   {CLR_CYAN}[15]{NC}🔬 Engine Diagnostics",
+            f"{CLR_CYAN}[3]{NC} 🎭 Privacy Profiles   {CLR_CYAN}[4]{NC} 🏷️  Toggle EXIF",
+            f"{CLR_CYAN}[5]{NC} 🎨 Toggle ICC Profile {CLR_CYAN}[6]{NC} 🎲 Custom Naming Studio",
+            f"{CLR_CYAN}[7]{NC} ⏱️  Toggle Time Clamp {CLR_CYAN}[8]{NC} 🔐 Manage Vault",
+            f"{CLR_CYAN}[9]{NC} 🔍 Live EXIF Audit    {CLR_CYAN}[10]{NC}🧹 Bulk Clean Folder",
+            f"{CLR_CYAN}[11]{NC}📜 Live Stream Logs   {CLR_CYAN}[12]{NC}🐤 Privacy Canary Tool",
+            f"{CLR_CYAN}[13]{NC}🩺 System Doctor       {CLR_CYAN}[14]{NC}🔄 Check for Updates",
+            f"{CLR_CYAN}[15]{NC}🔬 Engine Diagnostics  {CLR_CYAN}[16]{NC}📖 Feature & Privacy Manual",
             f"{CLR_RED}[0]{NC}  🚪 Exit Suite" + (f"        {CLR_AMBER}[U] 🚀 Update{NC}" if UPDATE_AVAILABLE else ""),
         ],
         CLR_BORDER,
@@ -883,11 +881,220 @@ def draw_dashboard():
 
 
 # ==============================================================================
+# FEATURE 6: CUSTOM NAMING & PREFIX STUDIO
+# ==============================================================================
+
+def tool_manage_naming():
+    """Configure custom prefixes, hash token lengths, and preview output."""
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        cfg = load_config()
+        w = get_ui_width()
+        pfx = cfg.get("prefix", "img_")
+        h_len = cfg.get("hash_len", 12)
+        enabled = cfg.get("random_hash", True)
+
+        preview = f"{pfx}{'7c9f2b84e1a0d3f5'[:h_len]}.png" if enabled else "Screenshot_20261026-165201.png"
+
+        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+        print(f"{CLR_CYAN}│{NC}  {BOLD}🎲  CUSTOM NAMING & PREFIX STUDIO{NC}")
+        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        print(f"  Random Hash Renaming : {pill(enabled)}")
+        print(f"  Current Prefix       : {BOLD}'{pfx}'{NC} {CLR_GRAY}(e.g. shot_, clean_, or empty){NC}")
+        print(f"  Hash Token Length    : {BOLD}{h_len} characters{NC}")
+        print(f"  Generated Example    : {CLR_GREEN}{BOLD}{preview}{NC}\n")
+        print(f"{CLR_BORDER}{'─' * w}{NC}")
+
+        print("  [1] Toggle Random Hash Renaming [ON/OFF]")
+        print("  [2] Change Custom Prefix (Type your own word)")
+        print("  [3] Set Hash Length (8 / 12 / 16 / 32 characters)")
+        print("  [4] Reset to Standard Default ('img_' with 12 chars)")
+        print("  [0] Back to Main Menu")
+        c = input("\n  Select [0-4]: ").strip()
+
+        if c == "1":
+            toggle_cfg("random_hash")
+        elif c == "2":
+            print(f"\n  Current Prefix: '{pfx}'")
+            print("  Type your desired prefix (e.g. 'clean_', 'shot_', 'p_', or leave blank for pure hash):")
+            new_pfx = input("  New Prefix > ").strip()
+            # Sanitize forbidden filesystem characters
+            sanitized = "".join(ch for ch in new_pfx if ch.isalnum() or ch in ("_", "-"))
+            cfg["prefix"] = sanitized
+            save_config(cfg)
+            print(f"  {CLR_GREEN}✔ Prefix updated to: '{sanitized}'{NC}")
+            time.sleep(1)
+        elif c == "3":
+            print("\n  Choose Token Length:")
+            print("  [1] Compact (8 characters)  -> e.g. img_7c9f2b84.png")
+            print("  [2] Standard (12 characters)-> e.g. img_7c9f2b84e1a0.png")
+            print("  [3] High (16 characters)    -> e.g. img_7c9f2b84e1a0d3f5.png")
+            print("  [4] Full UUID (32 chars)    -> e.g. img_7c9f2b84e1a0d3f5a1b2c3d4e5f60718.png")
+            l_choice = input("  Select [1-4]: ").strip()
+            if l_choice == "1": cfg["hash_len"] = 8
+            elif l_choice == "2": cfg["hash_len"] = 12
+            elif l_choice == "3": cfg["hash_len"] = 16
+            elif l_choice == "4": cfg["hash_len"] = 32
+            save_config(cfg)
+            print(f"  {CLR_GREEN}✔ Hash length saved.{NC}")
+            time.sleep(0.8)
+        elif c == "4":
+            cfg["prefix"] = "img_"
+            cfg["hash_len"] = 12
+            cfg["random_hash"] = True
+            save_config(cfg)
+            print(f"  {CLR_GREEN}✔ Defaults restored: 'img_' (12 chars){NC}")
+            time.sleep(0.8)
+        elif c == "0":
+            break
+
+
+# ==============================================================================
+# FEATURE 16: INTERACTIVE FEATURE & PRIVACY MANUAL
+# ==============================================================================
+
+def tool_feature_guide():
+    """Interactive field manual explaining each feature, threats, and benefits."""
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        w = get_ui_width()
+        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+        print(f"{CLR_CYAN}│{NC}  {BOLD}📖  SHOTCLEAN FEATURE & PRIVACY MANUAL{NC}")
+        print(f"{CLR_CYAN}│{NC}  {DIM}Understand how each privacy layer protects you{NC}")
+        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        print("  Select a feature to learn what it does and why it's helpful:\n")
+        print("  [1] 🏷️  EXIF / XMP / IPTC Metadata Stripping")
+        print("  [2] 🎨 Display ICC Color Profile Removal")
+        print("  [3] 🎲 Random Hash & Custom Prefix Renaming")
+        print("  [4] ⏱️  Anti-Forensic Timestamp Clamping (Timestomp)")
+        print("  [5] 🔐 Encrypted Safety Vault (AES-Authenticated)")
+        print("  [6] 🐤 Privacy Canary Tester (Audit External Apps)")
+        print("  [7] ⚡ Persistent ExifTool Engine (-stay_open)")
+        print("  [8] 📁 Multi-Folder Real-time Watcher")
+        print("  [0] Back to Main Menu")
+        c = input("\n  Select [0-8]: ").strip()
+
+        if c == "1":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🏷️ EXIF, XMP & IPTC METADATA SCRUBBING ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Strips hidden metadata chunks embedded into image binaries by Android,")
+            print("  cameras, and editing apps.\n")
+            print(f"{BOLD}Threats it neutralizes:{NC}")
+            print("  • Hardware Tracking: Device brand, model (e.g. Samsung Galaxy S24),")
+            print("    and specific firmware build numbers.")
+            print("  • Location Leaks: GPS latitude, longitude, and altitude coordinates.")
+            print("  • Digital Fingerprinting: Software packages used to edit the image.\n")
+            print(f"{BOLD}Why it's helpful:{NC}")
+            print("  Whenever you share or upload a screenshot, recipients cannot discover")
+            print("  what phone you used, where you were, or when the file was generated.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "2":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🎨 DISPLAY ICC COLOR PROFILE REMOVAL ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Deletes the embedded International Color Consortium (ICC) profile")
+            print("  (e.g., Display P3, sRGB, or OEM screen color profiles).\n")
+            print(f"{BOLD}Threats it neutralizes:{NC}")
+            print("  Modern OLED/AMOLED screens embed custom color profiles that match")
+            print("  specific screen hardware manufacturers and calibration revisions.")
+            print("  Forensic tools can match unique ICC profiles to specific phone lines.\n")
+            print(f"{BOLD}Why it's helpful:{NC}")
+            print("  Leaves your image with generic neutral rendering data that cannot be")
+            print("  correlated with your specific display panel.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "3":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🎲 RANDOM HASH & CUSTOM PREFIX RENAMING ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Replaces default chronological filenames with pseudo-random UUID hashes:")
+            print(f"  {CLR_RED}Screenshot_20261026-165201.png{NC} ──► {CLR_GREEN}img_fa49275d958a.png{NC}\n")
+            print(f"{BOLD}Threats it neutralizes:{NC}")
+            print("  Original screenshot filenames reveal:")
+            print("  1. The exact year, month, day, hour, minute, and second it was taken.")
+            print("  2. Your device's screenshot naming pattern (e.g., MIUI vs OneUI vs iOS).\n")
+            print(f"{BOLD}Custom Naming Studio Feature:{NC}")
+            print("  You can customize the prefix (e.g., 'shot_', 'clean_', or blank '')")
+            print("  and choose how many characters the hash should be (8 to 32 chars).")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "4":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== ⏱️ ANTI-FORENSIC TIMESTAMP CLAMPING (TIMESTOMP) ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Forces the filesystem access time (atime) and modification time (mtime)")
+            print("  to a static historical timestamp: 2020-01-01 00:00:00 UTC.\n")
+            print(f"{BOLD}Threats it neutralizes:{NC}")
+            print("  Even if you scrub EXIF and rename the file, filesystem forensic tools")
+            print("  can inspect the OS inode/filesystem table to determine when the file")
+            print("  was written to disk. Clamping eliminates this temporal correlation.\n")
+            print(f"{BOLD}Important Note for Gallery Apps:{NC}")
+            print("  When enabled, gallery apps sort screenshots into JANUARY 2020 because")
+            print("  they read the filesystem modification date! If you prefer new screenshots")
+            print("  to appear under 'Today', simply toggle Time Clamp [OFF] or use Balanced Profile.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "5":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🔐 ENCRYPTED SAFETY VAULT ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Before sanitizing an image, ShotClean can save an original copy into")
+            print("  ~/.shotclean/vault/ encrypted with 100,000-round PBKDF2 + AES keystream.\n")
+            print(f"{BOLD}Why it's helpful:{NC}")
+            print("  • Failsafe Recovery: If you ever need the original unscrubbed capture,")
+            print("    you can restore and decrypt it using Option [8].")
+            print("  • Zero-Knowledge Protection: Backups cannot be read by other Android")
+            print("    apps or media scanners because they are stored as encrypted .enc files.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "6":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🐤 PRIVACY CANARY AUDIT TOOL ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Generates a synthetic test image embedded with an intentional unique")
+            print("  tracking token (e.g., CANARY-9A4B8F12).\n")
+            print(f"{BOLD}Why it's helpful:{NC}")
+            print("  Upload the canary to an app (e.g., WhatsApp, Discord, Telegram, or Imgur),")
+            print("  download it back, and run the audit. ShotClean will reveal whether that")
+            print("  service truly strips metadata or preserves hidden user tracking tokens.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "7":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== ⚡ PERSISTENT EXIFTOOL ENGINE (-stay_open) ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Keeps a single ExifTool daemon running in RAM using a bidirectional pipe,")
+            print("  monitored by an automatic non-blocking 4.0-second safety timeout.\n")
+            print(f"{BOLD}Why it's helpful:{NC}")
+            print("  • High Speed: On mobile ARM processors, starting a cold Perl process takes")
+            print("    ~800ms. The persistent daemon completes scrubs in under 35ms.")
+            print("  • Deadlock Protection: Prevents Termux standard input/output pipe hangs.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "8":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 📁 MULTI-FOLDER REAL-TIME WATCHER ==={NC}\n")
+            print(f"{BOLD}What it does:{NC}")
+            print("  Allows you to monitor multiple directories at once (e.g., standard Screenshots,")
+            print("  DCIM/Camera, Downloads, or custom messaging save folders).\n")
+            print(f"{BOLD}Interactive Navigator:{NC}")
+            print("  Includes an interactive arrow-key directory browser (Option [2] -> [1]) so")
+            print("  you can select folders without typing lengthy storage paths.")
+            input("\n  Press [Enter] to return to manual...")
+
+        elif c == "0":
+            break
+
+
+# ==============================================================================
 # AUDIT & TOOLS
 # ==============================================================================
 
 def tool_live_audit():
-    """Live audit with real-time progressive status steps (never hangs)."""
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
@@ -940,7 +1147,6 @@ def tool_live_audit():
 
 
 def tool_engine_diagnostics():
-    """Live diagnostic inspector to troubleshoot daemon, queue, and pipes."""
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
@@ -987,7 +1193,6 @@ def tool_engine_diagnostics():
 
 
 def tool_live_logs():
-    """Live stream with color-coded category badges."""
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
@@ -1274,7 +1479,7 @@ def tool_profiles():
     cfg = load_config()
     print(f"{CLR_CYAN}=== Privacy Profiles ==={NC}\n")
     print("  [1] Ghost (Scrub EXIF + Strip ICC + UUID Rename + Time Clamp)")
-    print("  [2] Balanced (Scrub EXIF + Strip ICC + UUID Rename)")
+    print("  [2] Balanced (Scrub EXIF + Strip ICC + UUID Rename - Shows Today)")
     print("  [3] Preserve (Scrub EXIF only, keep original filename)")
     c = input("\n  Select [1-3]: ").strip()
     if c == "1":
@@ -1321,7 +1526,7 @@ def main():
             elif choice == "5":
                 toggle_cfg("strip_icc")
             elif choice == "6":
-                toggle_cfg("random_hash")
+                tool_manage_naming()
             elif choice == "7":
                 toggle_cfg("clamp_time")
             elif choice == "8":
@@ -1342,6 +1547,8 @@ def main():
                 tool_manual_check_updates()
             elif choice == "15":
                 tool_engine_diagnostics()
+            elif choice == "16":
+                tool_feature_guide()
             elif choice == "0":
                 break
 
