@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v5.0.0
+ShotClean Universal Studio v5.1.0
 Cross-platform metadata stripper, anti-forensics suite & granular folder protection.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -32,7 +32,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "5.0.0"
+CURRENT_VERSION = "5.1.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -294,6 +294,8 @@ def read_single_key():
             code = msvcrt.getch()
             if code == b'H': return "UP"
             elif code == b'P': return "DOWN"
+            elif code == b'M': return "RIGHT"
+            elif code == b'K': return "LEFT"
         elif ch in (b'\r', b'\n', b' '):
             return "ENTER"
         elif ch in (b'q', b'Q'):
@@ -336,6 +338,51 @@ def read_single_key():
             return ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+# ==============================================================================
+# UNIVERSAL ARROW-NAVIGATED MENU ENGINE
+# ==============================================================================
+
+def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0):
+    """
+    Renders an interactive menu navigated purely via arrow keys, with hotkeys preserved.
+    items: list of tuples: (hotkey_str, display_label, action_identifier)
+    """
+    cursor = default_idx
+    total = len(items)
+    w = get_ui_width()
+
+    while True:
+        os.system("cls" if os.name == "nt" else "clear")
+        if header_fn:
+            header_fn()
+
+        print(f"{CLR_BORDER}╭─ {BOLD}{title}{NC} {CLR_BORDER}{'─' * max(0, w - 5 - len(title))}╮{NC}")
+        for idx, (hotkey, label, _) in enumerate(items):
+            if idx == cursor:
+                print(f"{CLR_BORDER}│{NC}  {CLR_GREEN}{BOLD}▶ [{hotkey}] {label}{NC}")
+            else:
+                print(f"{CLR_BORDER}│{NC}    {CLR_GRAY}[{hotkey}] {label}{NC}")
+        print(f"{CLR_BORDER}╰{'─' * (w - 2)}╯{NC}")
+        print(f"  {CLR_BLUE}Navigate: [↑/↓ or W/S] · Select: [Enter/Space] · Back: [Q]{NC}")
+
+        key = read_single_key()
+        if key == "UP":
+            cursor = (cursor - 1) % total
+        elif key == "DOWN":
+            cursor = (cursor + 1) % total
+        elif key in ("ENTER", "RIGHT"):
+            return items[cursor][2]
+        elif key in ("QUIT", "ESC", "LEFT"):
+            for hk, _, act in items:
+                if hk in ("0", "q", "Q", "Back"):
+                    return act
+            return None
+        else:
+            for idx, (hk, _, act) in enumerate(items):
+                if key.lower() == str(hk).lower():
+                    return act
 
 
 # ==============================================================================
@@ -778,7 +825,7 @@ def sanitization_worker():
             if mode == "hash" and prefix and filepath.name.startswith(prefix):
                 continue
 
-            log_event("PROBE", f"Interception: {filepath.name} (Folder Profile: {rules.get('profile', 'custom').upper()})")
+            log_event("PROBE", f"Interception: {filepath.name} [{rules.get('profile', 'custom').upper()}]")
             if not file_settling_probe(filepath):
                 continue
 
@@ -916,13 +963,12 @@ class DaemonManager:
 
 
 # ==============================================================================
-# CLEAN MAIN DASHBOARD
+# MAIN DASHBOARD RENDERER
 # ==============================================================================
 
-def draw_dashboard():
-    os.system("cls" if os.name == "nt" else "clear")
-    cfg = load_config()
+def draw_main_header():
     w = get_ui_width()
+    cfg = load_config()
     folders = cfg.get("folders_v2", [])
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
@@ -934,7 +980,7 @@ def draw_dashboard():
 
     if UPDATE_AVAILABLE:
         print(f"{CLR_AMBER}╭─ {BOLD}🔔 UPDATE AVAILABLE{NC} {CLR_AMBER}{'─' * max(0, w - 24)}╮{NC}")
-        print(f"{CLR_AMBER}│{NC}  Commit {BOLD}{REMOTE_COMMIT_SHORT}{NC} ready · Select Option [10] to install")
+        print(f"{CLR_AMBER}│{NC}  Commit {BOLD}{REMOTE_COMMIT_SHORT}{NC} ready · Press [10] to install")
         print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
 
     # System Status Card
@@ -950,7 +996,7 @@ def draw_dashboard():
     # Monitored Folders Summary Card
     print(f"{CLR_AMBER}╭─ {BOLD}MONITORED FOLDERS ({len(folders)}){NC} {CLR_AMBER}{'─' * max(0, w - 26)}╮{NC}")
     if not folders:
-        print(f"{CLR_AMBER}│{NC}  {CLR_RED}No folders registered! Add one via Option [2].{NC}")
+        print(f"{CLR_AMBER}│{NC}  {CLR_RED}No folders registered! Add one below.{NC}")
     else:
         for f in folders[:3]:
             p_label = f.get("profile", "custom").upper()
@@ -960,80 +1006,67 @@ def draw_dashboard():
             print(f"{CLR_AMBER}│{NC}  {CLR_GRAY}...and {len(folders) - 3} more folder(s){NC}")
     print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
 
-    # Clean Two-Column Action Grid (No long descriptions)
-    print(f"{CLR_BORDER}╭─ {BOLD}COMMAND CENTER{NC} {CLR_BORDER}{'─' * max(0, w - 18)}╮{NC}")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[1]{NC} ⚡ Toggle Daemon       {CLR_CYAN}[2]{NC} 📁 Manage Folders")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[3]{NC} 🎲 Naming Studio       {CLR_CYAN}[4]{NC} 🔐 Safety Backup Vault")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[5]{NC} 🔍 Live EXIF Audit     {CLR_CYAN}[6]{NC} 🧹 Bulk Clean Folder")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[7]{NC} 📜 Live Stream Logs    {CLR_CYAN}[8]{NC} 🐤 Privacy Canary Tool")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[9]{NC} 🔬 Engine Diagnostics  {CLR_CYAN}[10]{NC}🔄 Check for Updates")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[11]{NC}📖 Feature Manual       {CLR_RED}[0]{NC} 🚪 Exit Suite")
-    print(f"{CLR_BORDER}╰{'─' * (w - 2)}╯{NC}")
-
 
 # ==============================================================================
-# SUBMENU 1: MANAGE FOLDERS & RULES
+# SUBMENU 1: MANAGE FOLDERS & RULES (ARROW-NAVIGATED)
 # ==============================================================================
 
 def tool_manage_folders():
+    cursor_idx = 0
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
         cfg = load_config()
         folders = cfg.get("folders_v2", [])
         w = get_ui_width()
 
-        # Pinned Educational Upper Section
-        print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW PER-FOLDER RULES WORK{NC} {CLR_CYAN}{'─' * max(0, w - 32)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  Assign independent security policies per directory:")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}GHOST{NC}     : Wipes EXIF/ICC + 2020 clamp + random hash.")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}BALANCED{NC}  : Wipes EXIF/ICC + readable slug (shows Today).")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}METADATA{NC}  : Wipes EXIF/ICC only (keeps filename intact).")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}TIMESTOMP{NC} : Clamps time to 2020 only (keeps EXIF & name).")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW PER-FOLDER RULES WORK{NC} {CLR_CYAN}{'─' * max(0, w - 32)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Assign independent security policies per directory:")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}GHOST{NC}     : Wipes EXIF/ICC + 2020 clamp + random hash.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}BALANCED{NC}  : Wipes EXIF/ICC + readable slug (shows Today).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}METADATA{NC}  : Wipes EXIF/ICC only (keeps filename intact).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}TIMESTOMP{NC} : Clamps time to 2020 only (keeps EXIF & name).")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+            print(f"  {BOLD}Registered Directories ({len(folders)}):{NC}")
+            for idx, f in enumerate(folders, 1):
+                p = Path(f["path"])
+                status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Missing Path{NC}"
+                disp = truncate_middle(f["path"], w - 24)
+                print(f"  [{idx}] {BOLD}{disp}{NC} [{CLR_AMBER}{f.get('profile', 'custom').upper()}{NC}] ({status})")
+            print()
 
-        print(f"  {BOLD}Registered Directories ({len(folders)}):{NC}\n")
-        for idx, f in enumerate(folders, 1):
-            p = Path(f["path"])
-            status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Missing Path{NC}"
-            profile_name = f.get("profile", "custom").upper()
-            disp = truncate_middle(f["path"], w - 24)
+        menu_items = [
+            ("A", "➕ Add New Folder (Arrow Navigator)", "add_arrow"),
+            ("T", "✍️  Add by Manual Path Entry", "add_manual"),
+            ("P", "⚡ Quick Preset: Add Default Screenshots Folder", "add_preset"),
+        ]
 
-            print(f"  [{idx}] {BOLD}{disp}{NC} [{CLR_AMBER}{profile_name}{NC}] ({status})")
-            exif_st = "EXIF:ON" if f.get("strip_exif") else "EXIF:OFF"
-            icc_st = "ICC:ON" if f.get("strip_icc") else "ICC:OFF"
-            time_st = "Clamp:2020" if f.get("clamp_time") else "Time:Current"
-            name_st = f"Name:{f.get('naming_mode', 'hash')}"
-            print(f"      ↳ {CLR_GRAY}{exif_st} · {icc_st} · {time_st} · {name_st}{NC}\n")
+        for i, f in enumerate(folders):
+            label = f"⚙️  Configure Rules for: {Path(f['path']).name or f['path']}"
+            menu_items.append((str(i + 1), label, ("config", i)))
 
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
-        print(f"  {CLR_GREEN}[A] Add New Folder (Arrow Navigator){NC}")
-        print(f"  [T] Add by Manual Path Entry")
-        print(f"  [P] Quick Preset: Add Default Screenshots Folder")
-        print(f"  [1-{len(folders)}] Select Folder to Customize Its Rules / Delete")
-        print(f"  [0] Back to Main Menu")
+        menu_items.append(("0", "🔙 Back to Main Menu", "back"))
 
-        c = input("\n  Select Option > ").strip()
+        action = run_arrow_menu(header_card, menu_items, title="FOLDERS & RULES", default_idx=cursor_idx)
 
-        if c.lower() == "a":
+        if action == "add_arrow":
             chosen = interactive_folder_browser()
             if chosen and chosen.exists():
                 str_p = str(chosen)
                 if not any(f["path"] == str_p for f in folders):
-                    new_entry = make_folder_entry(str_p, "ghost")
-                    folders.append(new_entry)
+                    folders.append(make_folder_entry(str_p, "ghost"))
                     cfg["folders_v2"] = folders
                     save_config(cfg)
                     DaemonManager.restart()
                     print(f"\n  {CLR_GREEN}✔ Added: {chosen.name} [Default: GHOST policy]{NC}")
                     time.sleep(1)
 
-        elif c.lower() == "t":
+        elif action == "add_manual":
+            os.system("cls" if os.name == "nt" else "clear")
             manual = input("\n  Enter full folder path: ").strip().strip("'\"")
             mp = Path(manual)
             if mp.exists() and mp.is_dir():
                 if not any(f["path"] == str(mp) for f in folders):
-                    new_entry = make_folder_entry(str(mp), "ghost")
-                    folders.append(new_entry)
+                    folders.append(make_folder_entry(str(mp), "ghost"))
                     cfg["folders_v2"] = folders
                     save_config(cfg)
                     DaemonManager.restart()
@@ -1043,7 +1076,7 @@ def tool_manage_folders():
                 print(f"  {CLR_RED}✖ Path does not exist or is not a directory.{NC}")
                 time.sleep(1)
 
-        elif c.lower() == "p":
+        elif action == "add_preset":
             def_path = str(detect_default_folder())
             if not any(f["path"] == def_path for f in folders):
                 folders.append(make_folder_entry(def_path, "ghost"))
@@ -1053,16 +1086,15 @@ def tool_manage_folders():
                 print(f"\n  {CLR_GREEN}✔ Added default screenshots folder!{NC}")
                 time.sleep(1)
 
-        elif c.isdigit() and 1 <= int(c) <= len(folders):
-            configure_individual_folder(int(c) - 1)
+        elif isinstance(action, tuple) and action[0] == "config":
+            configure_individual_folder(action[1])
 
-        elif c == "0":
+        elif action in ("back", None):
             break
 
 
 def configure_individual_folder(index: int):
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
         cfg = load_config()
         folders = cfg.get("folders_v2", [])
         if index >= len(folders):
@@ -1071,91 +1103,80 @@ def configure_individual_folder(index: int):
         f = folders[index]
         w = get_ui_width()
 
-        # Pinned Educational Upper Section for Specific Folder
-        print(f"{CLR_CYAN}╭─ {BOLD}💡 POLICY BREAKDOWN FOR THIS FOLDER{NC} {CLR_CYAN}{'─' * max(0, w - 38)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  Target: {CLR_WHITE}{truncate_middle(f['path'], w - 14)}{NC}")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF/ICC Scrubbing{NC} : Removes device model, build & screen color.")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}Timestamp Clamp{NC}    : 2020-01-01 prevents filesystem timeline correlation.")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}Naming Camouflage{NC}  : Masquerades as WhatsApp, camera, or word slug.")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 POLICY BREAKDOWN FOR THIS FOLDER{NC} {CLR_CYAN}{'─' * max(0, w - 38)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Target: {CLR_WHITE}{truncate_middle(f['path'], w - 14)}{NC}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Active Policy{NC} : {CLR_AMBER}{f.get('profile', 'custom').upper()}{NC}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF Strip{NC}    : {'ON' if f.get('strip_exif') else 'OFF'}  ·  {BOLD}ICC Strip{NC}: {'ON' if f.get('strip_icc') else 'OFF'}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Time Clamp{NC}    : {'ON (2020-01-01)' if f.get('clamp_time') else 'OFF (Today)'}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Naming Mode{NC}   : {f.get('naming_mode', 'hash')} (Prefix: '{f.get('prefix', 'img_')}')")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
-        print(f"  Active Profile  : {CLR_AMBER}{BOLD}{f.get('profile', 'custom').upper()}{NC}")
-        print(f"  1. EXIF Metadata: {'[ 🟢 ON ]' if f.get('strip_exif') else '[ ⚪ OFF ]'}")
-        print(f"  2. ICC Profile  : {'[ 🟢 ON ]' if f.get('strip_icc') else '[ ⚪ OFF ]'}")
-        print(f"  3. Time Clamping: {'[ 🟢 ON (2020-01-01) ]' if f.get('clamp_time') else '[ ⚪ OFF (Preserve Today) ]'}")
-        print(f"  4. Naming Style : {CLR_CYAN}{f.get('naming_mode', 'hash')}{NC} (Prefix: '{f.get('prefix', 'img_')}')\n")
+        menu_items = [
+            ("1", "🛡️  Apply Policy Preset (Ghost / Balanced / Metadata / Timestomp)", "preset"),
+            ("2", f"🏷️  Toggle EXIF Metadata Scrubbing [{'ON' if f.get('strip_exif') else 'OFF'}]", "toggle_exif"),
+            ("3", f"🎨 Toggle Display ICC Profile Removal [{'ON' if f.get('strip_icc') else 'OFF'}]", "toggle_icc"),
+            ("4", f"⏱️  Toggle Timestamp Clamping [{'2020-01-01' if f.get('clamp_time') else 'Today'}]", "toggle_time"),
+            ("5", f"🎲 Change Naming Camouflage Style [{f.get('naming_mode', 'hash')}]", "naming_style"),
+            ("6", "🗑️  Delete this folder from watchlist", "delete"),
+            ("0", "🔙 Done / Save & Return", "back"),
+        ]
 
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
-        print("  [1] Apply Preset (Ghost / Balanced / Metadata-Only / Timestomp-Only)")
-        print("  [2] Toggle EXIF Metadata Stripping [ON/OFF]")
-        print("  [3] Toggle Display ICC Profile Removal [ON/OFF]")
-        print("  [4] Toggle Timestamp Clamping (2020 vs Today)")
-        print("  [5] Change Naming Camouflage Style")
-        print("  [6] 🗑️  Delete this folder from watchlist")
-        print("  [0] Done / Save & Return")
+        action = run_arrow_menu(header_card, menu_items, title="FOLDER RULE CONFIGURATION")
 
-        choice = input("\n  Select > ").strip()
-
-        if choice == "1":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== Select Preset for This Folder ==={NC}\n")
-            print("  [1] 🛡️  Ghost (Full EXIF + ICC + Clamped 2020 + UUID Hash)")
-            print("  [2] ⚖️  Balanced (Full Scrub + Word Slug - Shows in Today's Gallery)")
-            print("  [3] 🏷️  Metadata Strip Only (Scrub EXIF/ICC, keep filename & Today)")
-            print("  [4] ⏱️  Timestomp Only (Clamp time to 2020, leave bytes & filename alone)")
-            p_sel = input("\n  Select Preset [1-4]: ").strip()
-            if p_sel == "1":
-                for k, v in PROFILE_PRESETS["ghost"].items():
+        if action == "preset":
+            def preset_header():
+                print(f"{CLR_CYAN}=== Select Policy Preset for this Folder ==={NC}\n")
+            p_items = [
+                ("1", "🛡️  Ghost (Full EXIF + ICC + Clamped 2020 + UUID Hash)", "ghost"),
+                ("2", "⚖️  Balanced (Full Scrub + Word Slug - Shows in Today's Gallery)", "balanced"),
+                ("3", "🏷️  Metadata Strip Only (Scrub EXIF/ICC, keep filename & Today)", "metadata_only"),
+                ("4", "⏱️  Timestomp Only (Clamp time to 2020, leave bytes & filename alone)", "timestomp_only"),
+                ("0", "🔙 Cancel", "back")
+            ]
+            chosen_p = run_arrow_menu(preset_header, p_items, title="PRESETS")
+            if chosen_p and chosen_p != "back":
+                for k, v in PROFILE_PRESETS[chosen_p].items():
                     if k != "label": f[k] = v
-                f["profile"] = "ghost"
-            elif p_sel == "2":
-                for k, v in PROFILE_PRESETS["balanced"].items():
-                    if k != "label": f[k] = v
-                f["profile"] = "balanced"
-            elif p_sel == "3":
-                for k, v in PROFILE_PRESETS["metadata_only"].items():
-                    if k != "label": f[k] = v
-                f["profile"] = "metadata_only"
-            elif p_sel == "4":
-                for k, v in PROFILE_PRESETS["timestomp_only"].items():
-                    if k != "label": f[k] = v
-                f["profile"] = "timestomp_only"
-            save_config(cfg)
-            DaemonManager.restart()
+                f["profile"] = chosen_p
+                save_config(cfg); DaemonManager.restart()
 
-        elif choice == "2":
+        elif action == "toggle_exif":
             f["strip_exif"] = not f.get("strip_exif", True)
             f["profile"] = "custom"
             save_config(cfg); DaemonManager.restart()
 
-        elif choice == "3":
+        elif action == "toggle_icc":
             f["strip_icc"] = not f.get("strip_icc", True)
             f["profile"] = "custom"
             save_config(cfg); DaemonManager.restart()
 
-        elif choice == "4":
+        elif action == "toggle_time":
             f["clamp_time"] = not f.get("clamp_time", True)
             f["profile"] = "custom"
             save_config(cfg); DaemonManager.restart()
 
-        elif choice == "5":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== Select Naming Style for This Folder ==={NC}\n")
-            print("  [1] UUID Hex Hash       (e.g. img_7c9f2b84.png)")
-            print("  [2] Readable Word Slug   (e.g. swift-falcon-42.png)")
-            print("  [3] WhatsApp Decoy       (e.g. IMG-20261026-WA0042.png)")
-            print("  [4] Camera DCIM Decoy    (e.g. DSC_4821.png)")
-            print("  [5] Reddit/Web Decoy     (e.g. RDT_20261026_140218.png)")
-            print("  [6] Original Filename    (Disabled)")
-            n_sel = input("\n  Choose [1-6]: ").strip()
-            styles = {"1": "hash", "2": "slug", "3": "decoy_wa", "4": "decoy_dcim", "5": "decoy_reddit", "6": "disabled"}
-            if n_sel in styles:
-                f["naming_mode"] = styles[n_sel]
-                f["random_hash"] = (styles[n_sel] != "disabled")
+        elif action == "naming_style":
+            def style_header():
+                print(f"{CLR_CYAN}=== Select Naming Style for this Folder ==={NC}\n")
+            s_items = [
+                ("1", "🛡️  UUID Hex Hash       (e.g. img_7c9f2b84.png)", "hash"),
+                ("2", "🔤 Readable Word Slug   (e.g. swift-falcon-42.png)", "slug"),
+                ("3", "💬 WhatsApp Decoy       (e.g. IMG-20261026-WA0042.png)", "decoy_wa"),
+                ("4", "📷 Camera DCIM Decoy    (e.g. DSC_4821.png)", "decoy_dcim"),
+                ("5", "🌐 Reddit / Web Decoy   (e.g. RDT_20261026_140218.png)", "decoy_reddit"),
+                ("6", "⚪ Original Filename    (Keep unchanged)", "disabled"),
+                ("0", "🔙 Cancel", "back")
+            ]
+            chosen_s = run_arrow_menu(style_header, s_items, title="NAMING CAMOUFLAGE")
+            if chosen_s and chosen_s != "back":
+                f["naming_mode"] = chosen_s
+                f["random_hash"] = (chosen_s != "disabled")
                 f["profile"] = "custom"
                 save_config(cfg); DaemonManager.restart()
 
-        elif choice == "6":
+        elif action == "delete":
+            os.system("cls" if os.name == "nt" else "clear")
             confirm = input(f"\n  Remove '{f['path']}' from monitored list? [y/N]: ").strip().lower()
             if confirm in ["y", "yes"]:
                 folders.pop(index)
@@ -1166,145 +1187,143 @@ def configure_individual_folder(index: int):
                 time.sleep(0.8)
                 return
 
-        elif choice == "0":
+        elif action in ("back", None):
             break
 
 
 # ==============================================================================
-# SUBMENU 2: NAMING & CAMOUFLAGE STUDIO
+# SUBMENU 2: NAMING & CAMOUFLAGE STUDIO (ARROW-NAVIGATED)
 # ==============================================================================
 
 def tool_manage_naming():
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
         cfg = load_config()
         w = get_ui_width()
-
         folders = cfg.get("folders_v2", [])
         target_folder = folders[0] if folders else DEFAULT_FOLDER_PROFILE
         mode = target_folder.get("naming_mode", "hash")
-        pfx = target_folder.get("prefix", "img_")
-        h_len = target_folder.get("hash_len", 12)
-
-        # Pinned Educational Upper Section
-        print(f"{CLR_CYAN}╭─ {BOLD}💡 WHAT NAMING CAMOUFLAGE DOES{NC} {CLR_CYAN}{'─' * max(0, w - 34)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  Standard screenshot names leak exact date, hour & second.")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}UUID Hash{NC}   : Unpredictable hex tokens (e.g. img_7c9f2b84.png).")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}Word Slugs{NC}  : Anonymous, memorable words (e.g. swift-falcon-42.png).")
-        print(f"{CLR_CYAN}│{NC}  • {BOLD}Decoys{NC}      : Plausible deniability (WhatsApp, DCIM, Reddit).")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
         dummy_path = Path("Screenshot_20261026-165201.png")
         sample_preview = generate_sanitized_filename(dummy_path, target_folder)
 
-        print(f"  Active Style  : {CLR_AMBER}{BOLD}{mode.upper()}{NC}")
-        print(f"  Sample Output : {CLR_GREEN}{BOLD}{sample_preview}{NC}\n")
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 WHAT NAMING CAMOUFLAGE DOES{NC} {CLR_CYAN}{'─' * max(0, w - 34)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Standard screenshot names leak exact date, hour & second.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}UUID Hash{NC}   : Unpredictable hex tokens (e.g. img_7c9f2b84.png).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Word Slugs{NC}  : Anonymous, memorable words (e.g. swift-falcon-42.png).")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Decoys{NC}      : Plausible deniability (WhatsApp, DCIM, Reddit).")
+            print(f"{CLR_CYAN}│{NC}  Sample Result: {CLR_GREEN}{BOLD}{sample_preview}{NC}")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
-        print("  [1] Switch Style (UUID Hash / Word Slug / Decoys)")
-        print("  [2] Configure Custom Prefix (e.g. 'shot_', 'p_', or empty)")
-        print("  [3] Set Hash Token Length (8 / 12 / 16 / 32 chars)")
-        print("  [4] Roll 3 Test Sample Previews")
-        print("  [5] Apply this style to ALL registered folders")
-        print("  [0] Back to Main Menu")
+        menu_items = [
+            ("1", f"🎭 Switch Naming Style [{mode.upper()}]", "style"),
+            ("2", f"✏️  Configure Prefix ['{target_folder.get('prefix', 'img_')}']", "prefix"),
+            ("3", f"🔢 Set Hash Token Length [{target_folder.get('hash_len', 12)} chars]", "length"),
+            ("4", "🎲 Roll 3 Test Previews", "preview"),
+            ("5", "🚀 Apply this style to ALL registered folders", "apply_all"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
 
-        c = input("\n  Select Option > ").strip()
+        action = run_arrow_menu(header_card, menu_items, title="NAMING & CAMOUFLAGE")
 
-        if c == "1":
+        if action == "style":
+            def style_header():
+                print(f"{CLR_CYAN}=== Select Naming Style ==={NC}\n")
+            s_items = [
+                ("1", "🛡️  UUID Hex Hash       (e.g. img_7c9f2b84e1a0.png)", "hash"),
+                ("2", "🔤 Readable Word Slug   (e.g. swift-falcon-42.png)", "slug"),
+                ("3", "💬 WhatsApp Decoy       (e.g. IMG-20261026-WA0042.png)", "decoy_wa"),
+                ("4", "📷 Camera DCIM Decoy    (e.g. DSC_4821.png)", "decoy_dcim"),
+                ("5", "🌐 Reddit / Web Decoy   (e.g. RDT_20261026_140218.png)", "decoy_reddit"),
+                ("6", "⚪ Preserve Original    (Keep filename unchanged)", "disabled"),
+                ("0", "🔙 Cancel", "back")
+            ]
+            chosen_s = run_arrow_menu(style_header, s_items, title="PROFILES")
+            if chosen_s and chosen_s != "back":
+                target_folder["naming_mode"] = chosen_s
+                target_folder["random_hash"] = (chosen_s != "disabled")
+                save_config(cfg); DaemonManager.restart()
+
+        elif action == "prefix":
             os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== Select Naming Profile ==={NC}\n")
-            print("  [1] 🛡️  UUID Hex Hash       (e.g. img_7c9f2b84e1a0.png)")
-            print("  [2] 🔤 Readable Word Slug   (e.g. swift-falcon-42.png)")
-            print("  [3] 💬 WhatsApp Decoy       (e.g. IMG-20261026-WA0042.png)")
-            print("  [4] 📷 Camera DCIM Decoy    (e.g. DSC_4821.png)")
-            print("  [5] 🌐 Reddit / Web Decoy   (e.g. RDT_20261026_140218.png)")
-            print("  [6] ⚪ Preserve Original    (Keep filename unchanged)")
-            sel = input("\n  Choose Profile [1-6]: ").strip()
-            styles = {"1": "hash", "2": "slug", "3": "decoy_wa", "4": "decoy_dcim", "5": "decoy_reddit", "6": "disabled"}
-            if sel in styles:
-                target_folder["naming_mode"] = styles[sel]
-                target_folder["random_hash"] = (styles[sel] != "disabled")
-                save_config(cfg)
-                DaemonManager.restart()
-                print(f"\n  {CLR_GREEN}✔ Style updated!{NC}")
-                time.sleep(0.8)
-
-        elif c == "2":
-            print(f"\n  Current Prefix: '{pfx}'")
-            new_pfx = input("  Enter new prefix: ").strip()
+            print(f"\n  Current Prefix: '{target_folder.get('prefix', 'img_')}'")
+            new_pfx = input("  Enter new prefix (e.g. 'shot_', 'p_', or blank): ").strip()
             sanitized = "".join(ch for ch in new_pfx if ch.isalnum() or ch in ("_", "-"))
             target_folder["prefix"] = sanitized
             save_config(cfg)
-            print(f"  {CLR_GREEN}✔ Prefix set to: '{sanitized}'{NC}")
+            print(f"  {CLR_GREEN}✔ Prefix updated to: '{sanitized}'{NC}")
             time.sleep(0.8)
 
-        elif c == "3":
-            print("\n  Select Hash Length: [1] 8 chars  [2] 12 chars  [3] 16 chars  [4] 32 chars")
-            l_sel = input("  Select [1-4]: ").strip()
-            lens = {"1": 8, "2": 12, "3": 16, "4": 32}
-            if l_sel in lens:
-                target_folder["hash_len"] = lens[l_sel]
-                save_config(cfg)
-                print(f"  {CLR_GREEN}✔ Length updated.{NC}")
-                time.sleep(0.8)
+        elif action == "length":
+            def len_header():
+                print(f"{CLR_CYAN}=== Select Hash Token Length ==={NC}\n")
+            l_items = [
+                ("1", "8 characters  (e.g. img_7c9f2b84.png)", 8),
+                ("2", "12 characters (e.g. img_7c9f2b84e1a0.png)", 12),
+                ("3", "16 characters (e.g. img_7c9f2b84e1a0d3f5.png)", 16),
+                ("4", "32 characters (Full UUID Hash)", 32),
+                ("0", "🔙 Cancel", "back")
+            ]
+            chosen_l = run_arrow_menu(len_header, l_items, title="TOKEN LENGTH")
+            if chosen_l and chosen_l != "back":
+                target_folder["hash_len"] = chosen_l
+                save_config(cfg); time.sleep(0.8)
 
-        elif c == "4":
-            print(f"\n  {CLR_AMBER}Rolling 3 test samples:{NC}")
+        elif action == "preview":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"\n  {CLR_AMBER}Rolling 3 test samples for '{mode.upper()}':{NC}\n")
             for _ in range(3):
-                print(f"   • {CLR_GREEN}{generate_sanitized_filename(dummy_path, target_folder)}{NC}")
+                print(f"   • {CLR_GREEN}{BOLD}{generate_sanitized_filename(dummy_path, target_folder)}{NC}")
             input("\n  Press [Enter] to continue...")
 
-        elif c == "5":
+        elif action == "apply_all":
             for f in folders:
                 f["naming_mode"] = target_folder.get("naming_mode", "hash")
                 f["prefix"] = target_folder.get("prefix", "img_")
                 f["hash_len"] = target_folder.get("hash_len", 12)
                 f["random_hash"] = target_folder.get("random_hash", True)
-            save_config(cfg)
-            DaemonManager.restart()
+            save_config(cfg); DaemonManager.restart()
             print(f"\n  {CLR_GREEN}✔ Applied to all {len(folders)} folders!{NC}")
             time.sleep(1)
 
-        elif c == "0":
+        elif action in ("back", None):
             break
 
 
 # ==============================================================================
-# SUBMENU 3: ENCRYPTED SAFETY VAULT
+# SUBMENU 3: ENCRYPTED SAFETY VAULT (ARROW-NAVIGATED)
 # ==============================================================================
 
 def tool_manage_vault():
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
         cfg = load_config()
         w = get_ui_width()
         vault_files = list(VAULT_DIR.glob("*"))
         enc_count = sum(1 for f in vault_files if f.suffix == ".enc")
 
-        # Pinned Educational Upper Section
-        print(f"{CLR_CYAN}╭─ {BOLD}💡 ZERO-KNOWLEDGE BACKUP VAULT{NC} {CLR_CYAN}{'─' * max(0, w - 34)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  Saves original, unscrubbed copies before sanitizing.")
-        print(f"{CLR_CYAN}│{NC}  • Encrypted with {BOLD}100,000-round PBKDF2 + AES keystream{NC}.")
-        print(f"{CLR_CYAN}│{NC}  • Invisible to other Android apps, media scanners & galleries.")
-        print(f"{CLR_CYAN}│{NC}  • Restores intact files on demand if needed.")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 ZERO-KNOWLEDGE BACKUP VAULT{NC} {CLR_CYAN}{'─' * max(0, w - 34)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Saves original, unscrubbed copies before sanitizing.")
+            print(f"{CLR_CYAN}│{NC}  • Encrypted with {BOLD}100,000-round PBKDF2 + AES keystream{NC}.")
+            print(f"{CLR_CYAN}│{NC}  • Stored: {BOLD}{len(vault_files)}{NC} total ({enc_count} AES-encrypted).")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
-        print(f"  Vault State     : {'[ 🟢 ON ]' if cfg.get('enable_backup') else '[ ⚪ OFF ]'}")
-        print(f"  Stored Backups  : {BOLD}{len(vault_files)}{NC} ({enc_count} AES-encrypted)")
-        print(f"  Directory       : {CLR_GRAY}{VAULT_DIR}{NC}\n")
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
+        v_state = "[ON]" if cfg.get("enable_backup") else "[OFF]"
+        menu_items = [
+            ("1", f"🔐 Toggle Backup Vault {v_state}", "toggle"),
+            ("2", "📦 Export & Decrypt All Backups to ~/Download/ShotClean_Restored", "export"),
+            ("3", "🗑️  Purge / Wipe Entire Vault Permanently", "purge"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
 
-        print("  [1] Toggle Backup Vault [ON/OFF]")
-        print("  [2] Export & Decrypt All Backups to ~/Download/ShotClean_Restored")
-        print("  [3] 🗑️  Purge / Wipe Entire Vault Permanently")
-        print("  [0] Back to Main Menu")
+        action = run_arrow_menu(header_card, menu_items, title="SAFETY VAULT")
 
-        c = input("\n  Select Option > ").strip()
-
-        if c == "1":
+        if action == "toggle":
             cfg["enable_backup"] = not cfg.get("enable_backup", False)
             save_config(cfg)
-        elif c == "2":
+
+        elif action == "export":
+            os.system("cls" if os.name == "nt" else "clear")
             if not vault_files:
                 print(f"  {CLR_AMBER}Vault is empty.{NC}"); time.sleep(1); continue
             out_dir = HOME / "Download" / "ShotClean_Restored"
@@ -1321,28 +1340,198 @@ def tool_manage_vault():
                     pass
             print(f"\n  {CLR_GREEN}✔ Decrypted and restored to:{NC}\n  {out_dir}")
             input("\n  Press [Enter] to continue...")
-        elif c == "3":
+
+        elif action == "purge":
+            os.system("cls" if os.name == "nt" else "clear")
             if input("\n  Permanently delete ALL backups in vault? [y/N]: ").strip().lower() in ["y", "yes"]:
                 for vf in vault_files: vf.unlink()
                 print(f"  {CLR_GREEN}✔ Vault purged.{NC}"); time.sleep(1)
-        elif c == "0":
+
+        elif action in ("back", None):
             break
 
 
 # ==============================================================================
-# SUBMENU 4: LIVE METADATA AUDITOR
+# SUBMENU 4: PRIVACY CANARY AUDIT (ARROW-NAVIGATED)
+# ==============================================================================
+
+def tool_privacy_canary():
+    while True:
+        w = get_ui_width()
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW THE PRIVACY CANARY AUDIT WORKS{NC} {CLR_CYAN}{'─' * max(0, w - 41)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Tests whether apps (WhatsApp, Discord, Telegram, Imgur) leak data:")
+            print(f"{CLR_CYAN}│{NC}  1. Generates an image with a hidden {BOLD}CANARY-TOKEN-XXXX{NC}.")
+            print(f"{CLR_CYAN}│{NC}  2. Send it through the app, then download the image back.")
+            print(f"{CLR_CYAN}│{NC}  3. Run Audit: If the token survives, the app tracks you.")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        menu_items = [
+            ("1", "🐤 Generate New Canary Image (Embeds Tracking Token)", "generate"),
+            ("2", "🔍 Audit Downloaded Image (Check If Token Survived)", "audit"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
+
+        action = run_arrow_menu(header_card, menu_items, title="PRIVACY CANARY")
+
+        if action == "generate":
+            os.system("cls" if os.name == "nt" else "clear")
+            token = f"CANARY-{uuid.uuid4().hex[:8].upper()}"
+            def_dir = detect_default_folder()
+            canary_path = def_dir / f"test_canary_{token}.png"
+            create_synthetic_png(canary_path)
+
+            EXIFTOOL_ENGINE.execute(
+                f"-Artist={token}",
+                f"-UserComment=CANARY_PRIVACY_AUDIT_{token}",
+                f"-Copyright={token}",
+                "-overwrite_original_in_place",
+                str(canary_path),
+                timeout=4.0
+            )
+
+            print(f"\n  {CLR_GREEN}{BOLD}✔ Canary Generated Successfully!{NC}")
+            print(f"  Token : {BOLD}{token}{NC}")
+            print(f"  Path  : {CLR_GRAY}{canary_path}{NC}\n")
+            print("  Instructions: Upload this test image to the app, download it back, then run [2].")
+            input("\n  Press [Enter] to continue...")
+
+        elif action == "audit":
+            os.system("cls" if os.name == "nt" else "clear")
+            path_str = input("\n  Enter path to downloaded image (or drag & drop): ").strip().strip("'\"")
+            p = Path(path_str)
+            if not p.exists() or not p.is_file():
+                print(f"  {CLR_RED}File not found.{NC}"); time.sleep(1.2); continue
+
+            out = EXIFTOOL_ENGINE.execute("-all", str(p), timeout=4.0)
+            if "CANARY-" in out:
+                print(f"\n  {CLR_RED}{BOLD}🚨 PRIVACY LEAK DETECTED!{NC}")
+                print("  The platform preserved metadata tracking tokens! Your images leak data.\n")
+            elif not out.strip():
+                print(f"\n  {CLR_GREEN}{BOLD}🛡️ 100% CLEAN & SAFE!{NC}")
+                print("  The platform completely stripped all metadata and canary tokens.\n")
+            else:
+                print(f"\n  {CLR_AMBER}{BOLD}⚠️ PARTIAL METADATA RETAINED:{NC}\n{out[:300]}")
+            input("  Press [Enter] to return...")
+
+        elif action in ("back", None):
+            break
+
+
+# ==============================================================================
+# SUBMENU 5: ENGINE DIAGNOSTICS (ARROW-NAVIGATED)
+# ==============================================================================
+
+def tool_engine_diagnostics():
+    while True:
+        w = get_ui_width()
+        cfg = load_config()
+        daemon_pid = EXIFTOOL_ENGINE.proc.pid if EXIFTOOL_ENGINE.proc else None
+        daemon_alive = EXIFTOOL_ENGINE.proc and (EXIFTOOL_ENGINE.proc.poll() is None)
+
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 ENGINE & PROCESS HEALTH CHECKS{NC} {CLR_CYAN}{'─' * max(0, w - 37)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  • ExifTool Binary Path  : {CLR_GREEN}{shutil.which('exiftool') or 'NOT FOUND'}{NC}")
+            print(f"{CLR_CYAN}│{NC}  • Persistent Daemon PID : {CLR_GREEN}{daemon_pid}{NC} ({'Alive' if daemon_alive else 'Dead/Restarting'})")
+            print(f"{CLR_CYAN}│{NC}  • Background Worker     : {'Active' if WORKER_THREAD.is_alive() else 'Dead'}")
+            print(f"{CLR_CYAN}│{NC}  • Work Queue Backlog    : {WORK_QUEUE.qsize()} task(s)")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        menu_items = [
+            ("1", "⚡ Force Restart ExifTool Daemon Pipe", "restart"),
+            ("2", "🏓 Ping Daemon Latency", "ping"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
+
+        action = run_arrow_menu(header_card, menu_items, title="ENGINE DIAGNOSTICS")
+
+        if action == "restart":
+            EXIFTOOL_ENGINE._restart()
+            print(f"\n  {CLR_GREEN}✔ Daemon recycled successfully.{NC}")
+            time.sleep(1)
+
+        elif action == "ping":
+            os.system("cls" if os.name == "nt" else "clear")
+            t0 = time.time()
+            test_out = EXIFTOOL_ENGINE.execute("-ver", timeout=3.0)
+            elapsed = int((time.time() - t0) * 1000)
+            print(f"\n  ExifTool Version : {BOLD}{test_out.strip()}{NC}")
+            print(f"  Ping Roundtrip   : {CLR_GREEN}{elapsed}ms{NC}\n")
+            input("  Press [Enter] to continue...")
+
+        elif action in ("back", None):
+            break
+
+
+# ==============================================================================
+# SUBMENU 6: FEATURE MANUAL (ARROW-NAVIGATED)
+# ==============================================================================
+
+def tool_feature_guide():
+    while True:
+        w = get_ui_width()
+        def header_card():
+            print(f"{CLR_CYAN}╭─ {BOLD}💡 PRIVACY THREAT MODEL & DEFENSE GUIDE{NC} {CLR_CYAN}{'─' * max(0, w - 43)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Select any feature below to understand what it protects.")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        menu_items = [
+            ("1", "🏷️  EXIF / XMP / IPTC Metadata Stripping", "exif"),
+            ("2", "🎨 Display ICC Color Profile Removal", "icc"),
+            ("3", "🎲 Decoy Presets & Diceware Word Slugs", "naming"),
+            ("4", "⏱️  Anti-Forensic Timestamp Clamping (Timestomp)", "time"),
+            ("5", "🔐 Encrypted Safety Vault (AES-Authenticated)", "vault"),
+            ("6", "📁 Granular Per-Folder Rules Explanation", "folders"),
+            ("0", "🔙 Back to Main Menu", "back"),
+        ]
+
+        action = run_arrow_menu(header_card, menu_items, title="FIELD MANUAL")
+
+        if action == "exif":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🏷️ EXIF METADATA STRIPPING ==={NC}\n")
+            print("  Wipes camera model, manufacturer, serial numbers, lens info, and GPS coordinates.")
+            input("\n  Press [Enter] to return...")
+        elif action == "icc":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🎨 ICC PROFILE REMOVAL ==={NC}\n")
+            print("  Removes display panel color profiles that fingerprint specific phone models.")
+            input("\n  Press [Enter] to return...")
+        elif action == "naming":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🎲 DECOY PRESETS & WORD SLUGS ==={NC}\n")
+            print("  Provides plausible deniability by mimicking everyday apps (WhatsApp, DCIM) or generating readable slugs.")
+            input("\n  Press [Enter] to return...")
+        elif action == "time":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING (TIMESTOMP) ==={NC}\n")
+            print("  Forces filesystem modification dates to 2020-01-01 to eliminate temporal correlation.")
+            print("  Tip: When enabled, gallery apps place screenshots into January 2020!")
+            input("\n  Press [Enter] to return...")
+        elif action == "vault":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 🔐 ENCRYPTED SAFETY VAULT ==={NC}\n")
+            print("  Keeps encrypted PBKDF2 + AES backups in ~/.shotclean/vault/ before scrubbing.")
+            input("\n  Press [Enter] to return...")
+        elif action == "folders":
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"{CLR_CYAN}=== 📁 GRANULAR PER-FOLDER RULES ==={NC}\n")
+            print("  Screenshots can use 'Ghost' (maximum scrub), while Camera folders can use")
+            print("  'Balanced' (shows under Today's feed with a word slug).")
+            input("\n  Press [Enter] to return...")
+        elif action in ("back", None):
+            break
+
+
+# ==============================================================================
+# AUDIT & LOG TOOLS
 # ==============================================================================
 
 def tool_live_audit():
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
-
-    # Pinned Educational Upper Section
     print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW THE LIVE METADATA AUDITOR WORKS{NC} {CLR_CYAN}{'─' * max(0, w - 42)}╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  Scans the most recent capture for remaining tracking tags:")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF/XMP{NC} : Checks for device brand, build numbers, GPS.")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}ICC Profile{NC} : Checks for screen calibration identifiers.")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}Timestamps{NC} : Confirms filesystem modification & access dates.")
+    print(f"{CLR_CYAN}│{NC}  Scans the most recent capture for remaining tracking tags.")
     print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
     cfg = load_config()
@@ -1385,121 +1574,45 @@ def tool_live_audit():
     input("  Press [Enter] to return...")
 
 
-# ==============================================================================
-# SUBMENU 5: PRIVACY CANARY AUDIT
-# ==============================================================================
-
-def tool_privacy_canary():
+def tool_live_logs():
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
+    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}📜  LIVE ACTIVITY LOG STREAM{NC}")
+    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
+    print(f"  {CLR_AMBER}Streaming real-time events... (Press Ctrl+C to return){NC}\n")
 
-    # Pinned Educational Upper Section
-    print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW THE PRIVACY CANARY AUDIT WORKS{NC} {CLR_CYAN}{'─' * max(0, w - 41)}╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  Tests whether apps (WhatsApp, Discord, Telegram, Imgur) leak data:")
-    print(f"{CLR_CYAN}│{NC}  1. Generates an image with a hidden {BOLD}CANARY-TOKEN-XXXX{NC}.")
-    print(f"{CLR_CYAN}│{NC}  2. Send it through the app, then download the image back.")
-    print(f"{CLR_CYAN}│{NC}  3. Run Audit: If the token survives, the app tracks you.")
-    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+    if not LOG_FILE.exists():
+        LOG_FILE.touch()
 
-    print("  [1] Generate New Canary Image (Embeds Tracking Token)")
-    print("  [2] Audit Downloaded Image (Check If Token Survived)")
-    print("  [0] Back to Main Menu")
-    c = input("\n  Select Option > ").strip()
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            for l in lines[-15:]:
+                print(f"  {CLR_GRAY}{l.strip()}{NC}")
+            f.seek(0, os.SEEK_END)
 
-    if c == "1":
-        token = f"CANARY-{uuid.uuid4().hex[:8].upper()}"
-        def_dir = detect_default_folder()
-        canary_path = def_dir / f"test_canary_{token}.png"
-        create_synthetic_png(canary_path)
+            while True:
+                line = f.readline()
+                if line:
+                    stripped = line.strip()
+                    if "[ERROR]" in stripped:
+                        print(f"  {CLR_RED}🚨 {stripped}{NC}")
+                    elif "[COMPLETE]" in stripped:
+                        print(f"  {CLR_GREEN}✔  {stripped}{NC}")
+                    else:
+                        print(f"  {CLR_CYAN}❯  {stripped}{NC}")
+                else:
+                    time.sleep(0.3)
+    except KeyboardInterrupt:
+        print(f"\n  {CLR_AMBER}Returned from live log stream.{NC}")
+        time.sleep(0.6)
 
-        EXIFTOOL_ENGINE.execute(
-            f"-Artist={token}",
-            f"-UserComment=CANARY_PRIVACY_AUDIT_{token}",
-            f"-Copyright={token}",
-            "-overwrite_original_in_place",
-            str(canary_path),
-            timeout=4.0
-        )
-
-        print(f"\n  {CLR_GREEN}{BOLD}✔ Canary Generated Successfully!{NC}")
-        print(f"  Token : {BOLD}{token}{NC}")
-        print(f"  Path  : {CLR_GRAY}{canary_path}{NC}\n")
-        print("  Instructions: Upload this test image to the app, download it back, then choose [2].")
-        input("\n  Press [Enter] to continue...")
-
-    elif c == "2":
-        path_str = input("\n  Enter path to downloaded image (or drag & drop): ").strip().strip("'\"")
-        p = Path(path_str)
-        if not p.exists() or not p.is_file():
-            print(f"  {CLR_RED}File not found.{NC}"); time.sleep(1.2); return
-
-        out = EXIFTOOL_ENGINE.execute("-all", str(p), timeout=4.0)
-        if "CANARY-" in out:
-            print(f"\n  {CLR_RED}{BOLD}🚨 PRIVACY LEAK DETECTED!{NC}")
-            print("  The platform preserved metadata tracking tokens! Your images leak data.\n")
-        elif not out.strip():
-            print(f"\n  {CLR_GREEN}{BOLD}🛡️ 100% CLEAN & SAFE!{NC}")
-            print("  The platform completely stripped all metadata and canary tokens.\n")
-        else:
-            print(f"\n  {CLR_AMBER}{BOLD}⚠️ PARTIAL METADATA RETAINED:{NC}\n{out[:300]}")
-        input("  Press [Enter] to return...")
-
-
-# ==============================================================================
-# SUBMENU 6: ENGINE DIAGNOSTICS
-# ==============================================================================
-
-def tool_engine_diagnostics():
-    os.system("cls" if os.name == "nt" else "clear")
-    w = get_ui_width()
-
-    # Pinned Educational Upper Section
-    print(f"{CLR_CYAN}╭─ {BOLD}💡 ENGINE & PROCESS HEALTH CHECKS{NC} {CLR_CYAN}{'─' * max(0, w - 37)}╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  Inspects low-level processes and communication pipes:")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}ExifTool Daemon{NC} : Persistent pipe eliminates 800ms spawn delay.")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}Worker Queue{NC}    : Verifies non-blocking async tasks.")
-    print(f"{CLR_CYAN}│{NC}  • {BOLD}Deadlock Check{NC}  : Tests timeout auto-recycling.")
-    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
-
-    cfg = load_config()
-    daemon_pid = EXIFTOOL_ENGINE.proc.pid if EXIFTOOL_ENGINE.proc else None
-    daemon_alive = EXIFTOOL_ENGINE.proc and (EXIFTOOL_ENGINE.proc.poll() is None)
-
-    print(f"  • ExifTool Binary Path  : {CLR_GREEN}{shutil.which('exiftool') or 'NOT FOUND'}{NC}")
-    print(f"  • Persistent Daemon PID : {CLR_GREEN}{daemon_pid}{NC} ({'Alive' if daemon_alive else 'Dead/Restarting'})")
-    print(f"  • Background Worker     : {'Active' if WORKER_THREAD.is_alive() else 'Dead'}")
-    print(f"  • Work Queue Backlog    : {WORK_QUEUE.qsize()} task(s)")
-
-    t0 = time.time()
-    test_out = EXIFTOOL_ENGINE.execute("-ver", timeout=3.0)
-    elapsed = int((time.time() - t0) * 1000)
-    print(f"  • Engine Ping Roundtrip : {CLR_GREEN}{test_out.strip() or 'OK'}{NC} ({elapsed}ms)")
-
-    print(f"\n{CLR_BORDER}{'─' * w}{NC}")
-    print("  [1] Force Restart ExifTool Daemon Pipe")
-    print("  [0] Back to Main Menu")
-    c = input("\n  Select Option > ").strip()
-    if c == "1":
-        EXIFTOOL_ENGINE._restart()
-        print(f"  {CLR_GREEN}✔ Daemon recycled successfully.{NC}")
-        time.sleep(1)
-
-
-# ==============================================================================
-# SUBMENU 7: BULK CLEAN, LOGS & MANUAL
-# ==============================================================================
 
 def tool_bulk_clean():
     os.system("cls" if os.name == "nt" else "clear")
-    w = get_ui_width()
-
-    # Pinned Educational Upper Section
-    print(f"{CLR_CYAN}╭─ {BOLD}💡 BULK SCRUBBING ENGINE{NC} {CLR_CYAN}{'─' * max(0, w - 28)}╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  Batch-scrubs existing images in registered folders.")
-    print(f"{CLR_CYAN}│{NC}  Applies each folder's dedicated local policy rules.")
-    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
-
     cfg = load_config()
+    print(f"{CLR_CYAN}=== Bulk Folder Scrubber ==={NC}\n")
     folders = [Path(f["path"]) for f in cfg.get("folders_v2", []) if Path(f["path"]).exists()]
     confirm = input("  Scrub all existing photos across registered folders? [y/N]: ").strip().lower()
     if confirm not in ["y", "yes"]:
@@ -1541,41 +1654,6 @@ def tool_bulk_clean():
     time.sleep(1.2)
 
 
-def tool_live_logs():
-    os.system("cls" if os.name == "nt" else "clear")
-    w = get_ui_width()
-    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}📜  LIVE ACTIVITY LOG STREAM{NC}")
-    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
-    print(f"  {CLR_AMBER}Streaming real-time events... (Press Ctrl+C to return){NC}\n")
-
-    if not LOG_FILE.exists():
-        LOG_FILE.touch()
-
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            for l in lines[-15:]:
-                print(f"  {CLR_GRAY}{l.strip()}{NC}")
-            f.seek(0, os.SEEK_END)
-
-            while True:
-                line = f.readline()
-                if line:
-                    stripped = line.strip()
-                    if "[ERROR]" in stripped:
-                        print(f"  {CLR_RED}🚨 {stripped}{NC}")
-                    elif "[COMPLETE]" in stripped:
-                        print(f"  {CLR_GREEN}✔  {stripped}{NC}")
-                    else:
-                        print(f"  {CLR_CYAN}❯  {stripped}{NC}")
-                else:
-                    time.sleep(0.3)
-    except KeyboardInterrupt:
-        print(f"\n  {CLR_AMBER}Returned from live log stream.{NC}")
-        time.sleep(0.6)
-
-
 def tool_manual_check_updates():
     os.system("cls" if os.name == "nt" else "clear")
     print(f"\n  {CLR_CYAN}Querying GitHub for latest commit on 'main'...{NC}")
@@ -1599,94 +1677,67 @@ def tool_manual_check_updates():
     input("  Press [Enter] to return...")
 
 
-def tool_feature_guide():
-    while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        w = get_ui_width()
-        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  {BOLD}📖  SHOTCLEAN FEATURE & PRIVACY MANUAL{NC}")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
-
-        print("  [1] 🏷️  EXIF / XMP / IPTC Metadata Stripping")
-        print("  [2] 🎨 Display ICC Color Profile Removal")
-        print("  [3] 🎲 Decoy Presets & Diceware Word Slugs")
-        print("  [4] ⏱️  Anti-Forensic Timestamp Clamping (Timestomp)")
-        print("  [5] 🔐 Encrypted Safety Vault (AES-Authenticated)")
-        print("  [6] 📁 Granular Per-Folder Rules Explanation")
-        print("  [0] Back to Main Menu")
-        c = input("\n  Select > ").strip()
-
-        if c == "1":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🏷️ EXIF METADATA STRIPPING ==={NC}\n")
-            print("  Wipes camera model, manufacturer, serial numbers, lens info, and GPS coordinates.")
-            input("\n  Press [Enter] to return...")
-        elif c == "2":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🎨 ICC PROFILE REMOVAL ==={NC}\n")
-            print("  Removes display panel color profiles that fingerprint specific phone models.")
-            input("\n  Press [Enter] to return...")
-        elif c == "3":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🎲 DECOY PRESETS & WORD SLUGS ==={NC}\n")
-            print("  Provides plausible deniability by mimicking everyday apps (WhatsApp, DCIM) or generating readable slugs.")
-            input("\n  Press [Enter] to return...")
-        elif c == "4":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING (TIMESTOMP) ==={NC}\n")
-            print("  Forces filesystem modification dates to 2020-01-01 to eliminate temporal correlation.")
-            print("  Tip: When enabled, gallery apps place screenshots into January 2020!")
-            input("\n  Press [Enter] to return...")
-        elif c == "5":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🔐 ENCRYPTED SAFETY VAULT ==={NC}\n")
-            print("  Keeps encrypted PBKDF2 + AES backups in ~/.shotclean/vault/ before scrubbing.")
-            input("\n  Press [Enter] to return...")
-        elif c == "6":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 📁 GRANULAR PER-FOLDER RULES ==={NC}\n")
-            print("  Screenshots can use 'Ghost' (maximum scrub), while Camera folders can use")
-            print("  'Balanced' (shows under Today's feed with a word slug).")
-            input("\n  Press [Enter] to return...")
-        elif c == "0":
-            break
-
-
 # ==============================================================================
-# MAIN EVENT LOOP
+# MAIN ARROW-DRIVEN EVENT LOOP
 # ==============================================================================
 
 def main():
     DaemonManager.start()
 
+    main_menu_items = [
+        ("1", "⚡ Toggle Daemon (Start / Halt)", "toggle"),
+        ("2", "📁 Manage Folders & Granular Rules", "folders"),
+        ("3", "🎲 Naming & Camouflage Studio", "naming"),
+        ("4", "🔐 Safety Backup Vault", "vault"),
+        ("5", "🔍 Live EXIF & Metadata Audit", "audit"),
+        ("6", "🧹 Bulk Folder Scrubber", "bulk"),
+        ("7", "📜 Live Event Stream Logs", "logs"),
+        ("8", "🐤 Privacy Canary Tester", "canary"),
+        ("9", "🔬 Engine Diagnostics", "diagnostics"),
+        ("10", "🔄 Check for Updates", "update"),
+        ("11", "📖 Privacy Field Manual", "manual"),
+        ("0", "🚪 Exit Suite", "exit"),
+    ]
+
+    cursor = 0
     try:
         while True:
-            draw_dashboard()
-            choice = input(" ❯ Select option: ").strip()
+            choice = run_arrow_menu(draw_main_header, main_menu_items, title="COMMAND CENTER", default_idx=cursor)
 
-            if choice == "1":
+            if choice == "toggle":
                 DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
-            elif choice == "2":
+                cursor = 0
+            elif choice == "folders":
                 tool_manage_folders()
-            elif choice == "3":
+                cursor = 1
+            elif choice == "naming":
                 tool_manage_naming()
-            elif choice == "4":
+                cursor = 2
+            elif choice == "vault":
                 tool_manage_vault()
-            elif choice == "5":
+                cursor = 3
+            elif choice == "audit":
                 tool_live_audit()
-            elif choice == "6":
+                cursor = 4
+            elif choice == "bulk":
                 tool_bulk_clean()
-            elif choice == "7":
+                cursor = 5
+            elif choice == "logs":
                 tool_live_logs()
-            elif choice == "8":
+                cursor = 6
+            elif choice == "canary":
                 tool_privacy_canary()
-            elif choice == "9":
+                cursor = 7
+            elif choice == "diagnostics":
                 tool_engine_diagnostics()
-            elif choice == "10":
+                cursor = 8
+            elif choice == "update":
                 tool_manual_check_updates()
-            elif choice == "11":
+                cursor = 9
+            elif choice == "manual":
                 tool_feature_guide()
-            elif choice == "0":
+                cursor = 10
+            elif choice in ("exit", "back", None):
                 break
 
     except (KeyboardInterrupt, EOFError):
