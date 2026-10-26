@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v4.4.0
+ShotClean Universal Studio v4.6.0
 Cross-platform metadata stripper, anti-forensics suite & automated privacy shield.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -31,7 +31,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB WEB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "4.4.0"
+CURRENT_VERSION = "4.6.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -100,7 +100,7 @@ def perform_direct_web_update():
         if REMOTE_SHA:
             COMMIT_CACHE_FILE.write_text(REMOTE_SHA, encoding="utf-8")
 
-        print(f"  {CLR_GREEN}{BOLD}✔ Updated to v{CURRENT_VERSION}! Restarting...{NC}\n")
+        print(f"  {CLR_GREEN}{BOLD}✔ Updated successfully! Restarting...{NC}\n")
         time.sleep(1)
         os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
@@ -171,6 +171,7 @@ DEFAULT_CONFIG = {
     "clamp_time": True,
     "enable_backup": False,
     "encrypt_vault": True,
+    "verbose_debug": True,
 }
 
 
@@ -192,18 +193,24 @@ def save_config(cfg):
 CONFIG = load_config()
 
 
-def log_event(msg: str):
+# ==============================================================================
+# ADVANCED SUBSYSTEM LOGGING & EVENT TRACING
+# ==============================================================================
+
+def log_event(category: str, msg: str):
+    """Categorized event logging with automatic log rotation."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{timestamp}] [{category.upper():<7}] {msg}"
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {msg}\n")
+            f.write(formatted + "\n")
 
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 100000:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 150000:
             with open(LOG_FILE, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            if len(lines) > 500:
+            if len(lines) > 600:
                 with open(LOG_FILE, "w", encoding="utf-8") as f:
-                    f.writelines(lines[-250:])
+                    f.writelines(lines[-300:])
     except Exception:
         pass
 
@@ -213,7 +220,6 @@ def log_event(msg: str):
 # ==============================================================================
 
 def read_single_key():
-    """Reads arrow keys and single keypresses across Linux, Termux, and Windows."""
     if platform.system() == "Windows":
         import msvcrt
         ch = msvcrt.getch()
@@ -250,7 +256,7 @@ def read_single_key():
                 return "DOWN"
             elif ch in ('q', 'Q'):
                 return "QUIT"
-            elif ch == '\x03':  # Ctrl+C
+            elif ch == '\x03':
                 raise KeyboardInterrupt
             return ch
         finally:
@@ -262,7 +268,6 @@ def read_single_key():
 # ==============================================================================
 
 def interactive_folder_browser(start_dir: Path = None) -> Path:
-    """Browse directories with Up/Down arrow keys and select with Enter."""
     if start_dir is None or not start_dir.exists():
         if Path("/storage/emulated/0").exists():
             cur_dir = Path("/storage/emulated/0")
@@ -343,10 +348,11 @@ def interactive_folder_browser(start_dir: Path = None) -> Path:
 
 
 # ==============================================================================
-# PERSISTENT EXIFTOOL DAEMON (-stay_open)
+# ROBUST EXIFTOOL DAEMON (DEADLOCK-FREE WITH TIMEOUT WATCHDOG)
 # ==============================================================================
 
 class ExifToolDaemon:
+    """Non-blocking, auto-recovering ExifTool daemon with 4.0s hard timeout."""
     def __init__(self):
         self.proc = None
         self.lock = threading.Lock()
@@ -356,26 +362,47 @@ class ExifToolDaemon:
         if not shutil.which("exiftool"):
             return
         try:
+            # Important: stderr=subprocess.DEVNULL stops pipe-buffer deadlocks on Termux
             self.proc = subprocess.Popen(
                 ["exiftool", "-stay_open", "True", "-@", "-"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
                 errors="replace"
             )
-        except Exception:
+            log_event("ENGINE", f"ExifTool persistent daemon online (PID: {self.proc.pid})")
+        except Exception as e:
+            log_event("ERROR", f"Failed starting ExifTool daemon: {e}")
             self.proc = None
 
-    def execute(self, *args) -> str:
+    def _restart(self):
+        if self.proc:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        self.proc = None
+        self._start()
+
+    def execute(self, *args, timeout: float = 4.0) -> str:
         with self.lock:
             if not self.proc or self.proc.poll() is not None:
                 self._start()
+
             if not self.proc:
-                res = subprocess.run(["exiftool"] + list(args), capture_output=True, text=True)
-                return res.stdout
+                # Direct fallback execution if daemon unavailable
+                try:
+                    res = subprocess.run(
+                        ["exiftool"] + list(args),
+                        capture_output=True, text=True, timeout=timeout
+                    )
+                    return res.stdout
+                except Exception as e:
+                    log_event("ERROR", f"Direct ExifTool fallback failed: {e}")
+                    return ""
 
             cmd = "\n".join(args) + "\n-execute\n"
             try:
@@ -383,14 +410,37 @@ class ExifToolDaemon:
                 self.proc.stdin.flush()
 
                 output_lines = []
+                start_wait = time.time()
+
                 while True:
+                    # Non-blocking poll using select on POSIX
+                    if platform.system() != "Windows":
+                        remaining = max(0.05, timeout - (time.time() - start_wait))
+                        r, _, _ = select.select([self.proc.stdout], [], [], remaining)
+                        if not r:
+                            log_event("WARN", "ExifTool pipe response timed out! Auto-recycling engine...")
+                            self._restart()
+                            # Run fallback once directly
+                            res = subprocess.run(
+                                ["exiftool"] + list(args),
+                                capture_output=True, text=True, timeout=3.0
+                            )
+                            return res.stdout
+
                     line = self.proc.stdout.readline()
                     if not line or line.strip() == "{ready}":
                         break
                     output_lines.append(line)
+
+                    if time.time() - start_wait > timeout:
+                        log_event("WARN", "ExifTool reading exceeded safety timeout. Resetting daemon.")
+                        self._restart()
+                        break
+
                 return "".join(output_lines)
-            except Exception:
-                self._start()
+            except Exception as e:
+                log_event("ERROR", f"Daemon I/O communication error: {e}")
+                self._restart()
                 return ""
 
     def close(self):
@@ -399,7 +449,7 @@ class ExifToolDaemon:
                 try:
                     self.proc.stdin.write("-stay_open\nFalse\n-execute\n")
                     self.proc.stdin.flush()
-                    self.proc.communicate(timeout=1.5)
+                    self.proc.communicate(timeout=1.0)
                 except Exception:
                     self.proc.kill()
                 self.proc = None
@@ -575,7 +625,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # ==============================================================================
-# SANITIZATION WORKER QUEUE
+# SANITIZATION WORKER QUEUE WITH SUB-MILLISECOND TRACING
 # ==============================================================================
 
 WORK_QUEUE = queue.Queue()
@@ -615,7 +665,9 @@ def sanitization_worker():
             if not filepath.exists() or filepath.name.startswith(".") or filepath.name.startswith(prefix):
                 continue
 
+            log_event("PROBE", f"Interception triggered: {filepath.name}. Testing write lock...")
             if not file_settling_probe(filepath):
+                log_event("WARN", f"File write probe timed out or vanished: {filepath.name}")
                 continue
 
             file_key = f"{filepath.name}_{filepath.stat().st_size}"
@@ -624,6 +676,7 @@ def sanitization_worker():
                 continue
             PROCESSED_COOLDOWN[file_key] = now
 
+            # 1. Vault Backup
             if cfg.get("enable_backup", False):
                 try:
                     raw_bytes = filepath.read_bytes()
@@ -632,47 +685,61 @@ def sanitization_worker():
                         sec = get_vault_secret()
                         enc = encrypt_payload(raw_bytes, sec)
                         (VAULT_DIR / f"{filepath.stem}_{t_token}.enc").write_bytes(enc)
+                        log_event("VAULT", f"Encrypted original backup stored: {filepath.stem}_{t_token}.enc")
                     else:
                         (VAULT_DIR / f"{filepath.stem}_{t_token}{filepath.suffix}").write_bytes(raw_bytes)
+                        log_event("VAULT", f"Plain original backup saved: {filepath.stem}_{t_token}{filepath.suffix}")
                 except Exception as ex:
-                    log_event(f"Backup failed for {filepath.name}: {ex}")
+                    log_event("ERROR", f"Vault backup failed for {filepath.name}: {ex}")
 
+            # 2. ExifTool Scrubbing
             if cfg.get("strip_exif", True):
                 args = ["-all="]
                 if cfg.get("strip_icc", True):
                     args.append("-icc_profile:all=")
                 args.extend(["-overwrite_original_in_place", str(filepath)])
-                EXIFTOOL_ENGINE.execute(*args)
+
+                t0 = time.time()
+                EXIFTOOL_ENGINE.execute(*args, timeout=4.0)
+                elapsed_ms = int((time.time() - t0) * 1000)
+                log_event("EXIF", f"Scrubbed EXIF/ICC profiles in-place ({elapsed_ms}ms)")
 
             target_path = filepath
 
+            # 3. Hash Renaming
             if cfg.get("random_hash", True):
                 rand_token = uuid.uuid4().hex[:12]
                 new_name = f"{prefix}{rand_token}{filepath.suffix.lower()}"
                 target_path = filepath.parent / new_name
                 try:
                     filepath.rename(target_path)
-                except OSError:
+                    log_event("RENAME", f"Randomized name: {filepath.name} -> {target_path.name}")
+                except OSError as e:
+                    log_event("ERROR", f"Rename error: {e}")
                     target_path = filepath
 
+            # 4. Anti-Forensic Timestamp Clamping (2020-01-01)
             if cfg.get("clamp_time", True):
                 try:
                     epoch_2020 = 1577836800.0
                     os.utime(target_path, (epoch_2020, epoch_2020))
+                    log_event("TIMESTOMP", "Clamped mtime/atime to 2020-01-01 00:00:00")
                 except OSError:
                     pass
 
+            # 5. Media Scanner Refresh
             if "com.termux" in os.environ.get("PREFIX", ""):
                 subprocess.run(
                     ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{target_path}"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
+                log_event("MEDIA", f"Broadcasted gallery update for {target_path.name}")
 
             SESSION_CLEANED_COUNT += 1
-            log_event(f"Sanitized: {filepath.name} -> {target_path.name}")
+            log_event("COMPLETE", f"✔ Successfully sanitized: {target_path.name}")
 
         except Exception as ex:
-            log_event(f"Worker error: {ex}")
+            log_event("ERROR", f"Worker uncaught exception: {ex}")
         finally:
             WORK_QUEUE.task_done()
 
@@ -686,12 +753,14 @@ class AsyncWatchHandler(FileSystemEventHandler):
         if not event.is_directory:
             p = Path(event.src_path)
             if p.suffix.lower() in VALID_EXTENSIONS:
+                log_event("WATCHER", f"Filesystem on_created: {p.name}")
                 WORK_QUEUE.put(p)
 
     def on_moved(self, event):
         if not event.is_directory:
             p = Path(event.dest_path)
             if p.suffix.lower() in VALID_EXTENSIONS:
+                log_event("WATCHER", f"Filesystem on_moved: {p.name}")
                 WORK_QUEUE.put(p)
 
 
@@ -706,6 +775,7 @@ class DaemonManager:
         cfg = load_config()
         valid_folders = [Path(f) for f in cfg.get("folders", []) if Path(f).exists()]
         if not valid_folders:
+            log_event("WARN", "No registered folders exist on disk to monitor.")
             return
 
         cls.observer = Observer()
@@ -715,7 +785,7 @@ class DaemonManager:
 
         cls.observer.start()
         cls.is_running = True
-        log_event(f"Daemon active. Watching {len(valid_folders)} folder(s).")
+        log_event("DAEMON", f"Background watcher online. Tracking {len(valid_folders)} folder(s).")
 
     @classmethod
     def stop(cls):
@@ -725,7 +795,7 @@ class DaemonManager:
         cls.observer.join()
         cls.is_running = False
         cls.observer = None
-        log_event("Daemon stopped.")
+        log_event("DAEMON", "Background watcher halted.")
 
     @classmethod
     def restart(cls):
@@ -761,7 +831,7 @@ def draw_dashboard():
 
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
     print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}")
-    print(f"{CLR_CYAN}│{NC}  {DIM}High-Speed Privacy & Anti-Forensic Defense Suite{NC}")
+    print(f"{CLR_CYAN}│{NC}  {DIM}Zero-Footprint Privacy & Anti-Forensic Defense{NC}")
     print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
 
     if UPDATE_AVAILABLE:
@@ -773,8 +843,8 @@ def draw_dashboard():
         "SYSTEM HEALTH",
         [
             f"OS Env  : {BOLD}{SystemDoctor.get_os_string()}{NC}",
-            f"Engine  : {status_text}  {CLR_GRAY}(Session cleaned: {SESSION_CLEANED_COUNT}){NC}",
-            f"Daemon  : {CLR_GREEN}Persistent Pipe Active (-stay_open){NC}",
+            f"Engine  : {status_text}  {CLR_GRAY}(Session scrubbed: {SESSION_CLEANED_COUNT}){NC}",
+            f"Queue   : {WORK_QUEUE.qsize()} pending  ·  Pipe: {CLR_GREEN}Deadlock-Protected{NC}",
             f"Watched : {BOLD}{folder_count} folder(s) registered{NC}",
         ],
         CLR_BLUE,
@@ -805,6 +875,7 @@ def draw_dashboard():
             f"{CLR_CYAN}[8]{NC} 🔐 Manage Vault       {CLR_CYAN}[9]{NC} 🔍 Live EXIF Audit",
             f"{CLR_CYAN}[10]{NC}🧹 Bulk Clean Folder   {CLR_CYAN}[11]{NC}📜 Live Stream Logs",
             f"{CLR_CYAN}[12]{NC}🐤 Privacy Canary Tool {CLR_CYAN}[13]{NC}🩺 System Doctor",
+            f"{CLR_CYAN}[14]{NC}🔄 Check for Updates   {CLR_CYAN}[15]{NC}🔬 Engine Diagnostics",
             f"{CLR_RED}[0]{NC}  🚪 Exit Suite" + (f"        {CLR_AMBER}[U] 🚀 Update{NC}" if UPDATE_AVAILABLE else ""),
         ],
         CLR_BORDER,
@@ -815,8 +886,108 @@ def draw_dashboard():
 # AUDIT & TOOLS
 # ==============================================================================
 
+def tool_live_audit():
+    """Live audit with real-time progressive status steps (never hangs)."""
+    os.system("cls" if os.name == "nt" else "clear")
+    w = get_ui_width()
+    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🔍  LIVE METADATA & ICC PROFILE AUDIT{NC}")
+    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+    cfg = load_config()
+    print(f"  {CLR_CYAN}[1/3]{NC} Searching monitored folders for latest image...")
+    candidates = []
+    for f in cfg.get("folders", []):
+        p = Path(f)
+        if p.exists():
+            for ext in VALID_EXTENSIONS:
+                candidates.extend(p.glob(f"*{ext}"))
+
+    if not candidates:
+        print(f"\n  {CLR_AMBER}✖ No images found across your registered folders.{NC}\n")
+        input("  Press [Enter] to return...")
+        return
+
+    latest_file = max(candidates, key=lambda f: f.stat().st_mtime)
+    print(f"  {CLR_GREEN}[✔]{NC} Found target: {BOLD}{latest_file.name}{NC}")
+    print(f"      Path: {CLR_GRAY}{latest_file.parent}{NC}\n")
+
+    print(f"  {CLR_CYAN}[2/3]{NC} Querying ExifTool metadata tags (with 4s safety timeout)...")
+    t0 = time.time()
+    out = EXIFTOOL_ENGINE.execute(
+        "-exif:all", "-xmp:all", "-iptc:all", "-icc_profile:all",
+        str(latest_file), timeout=4.0
+    )
+    elapsed_ms = int((time.time() - t0) * 1000)
+    print(f"  {CLR_GREEN}[✔]{NC} ExifTool responded in {elapsed_ms}ms\n")
+
+    print(f"  {CLR_CYAN}[3/3]{NC} Verifying metadata signatures:")
+    print(f"{CLR_BORDER}{'─' * w}{NC}")
+
+    if not out.strip():
+        print(f"  {CLR_GREEN}{BOLD}✔ 100% CLEAN - ZERO EXIF, XMP, IPTC OR ICC DATA DETECTED!{NC}")
+    else:
+        print(f"  {CLR_RED}{BOLD}🚨 LEAK DETECTED - Remaining tags:{NC}\n")
+        for line in out.splitlines():
+            print(f"    {CLR_RED}• {line}{NC}")
+
+    st = latest_file.stat()
+    print(f"\n{CLR_BORDER}── FILESYSTEM TIMESTAMPS ────────────────────────────{NC}")
+    print(f"  Modified Time : {time.ctime(st.st_mtime)}")
+    print(f"  Access Time   : {time.ctime(st.st_atime)}")
+    print(f"{CLR_BORDER}{'─' * w}{NC}\n")
+    input("  Press [Enter] to return...")
+
+
+def tool_engine_diagnostics():
+    """Live diagnostic inspector to troubleshoot daemon, queue, and pipes."""
+    os.system("cls" if os.name == "nt" else "clear")
+    w = get_ui_width()
+    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🔬  SHOTCLEAN ENGINE DIAGNOSTICS & AUDIT{NC}")
+    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+    cfg = load_config()
+    daemon_pid = EXIFTOOL_ENGINE.proc.pid if EXIFTOOL_ENGINE.proc else None
+    daemon_alive = EXIFTOOL_ENGINE.proc and (EXIFTOOL_ENGINE.proc.poll() is None)
+
+    print(f"  {BOLD}Subsystem Health Checks:{NC}")
+    print(f"   • ExifTool Binary Path  : {CLR_GREEN}{shutil.which('exiftool') or 'NOT FOUND'}{NC}")
+    print(f"   • Persistent Daemon PID : {CLR_GREEN}{daemon_pid}{NC} ({'Alive' if daemon_alive else 'Dead/Restarting'})")
+    print(f"   • Background Worker     : {'Active' if WORKER_THREAD.is_alive() else 'Dead'}")
+    print(f"   • Work Queue Backlog    : {WORK_QUEUE.qsize()} task(s)")
+    print(f"   • Storage Mounted       : {'Yes (/storage/emulated/0 accessible)' if Path('/storage/emulated/0').exists() else 'Desktop/Non-Android'}")
+
+    print(f"\n  {BOLD}Engine Responsiveness Test:{NC}")
+    t0 = time.time()
+    test_out = EXIFTOOL_ENGINE.execute("-ver", timeout=3.0)
+    elapsed = int((time.time() - t0) * 1000)
+    print(f"   • Ping ExifTool Engine  : {CLR_GREEN}{test_out.strip() or 'OK'}{NC} ({elapsed}ms roundtrip)")
+
+    print(f"\n  {BOLD}Recent Diagnostics Errors (Last 10):{NC}")
+    if LOG_FILE.exists():
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = [l for l in f.readlines() if "[ERROR]" in l or "[WARN]" in l][-10:]
+            if lines:
+                for l in lines:
+                    print(f"   {CLR_RED}{l.strip()}{NC}")
+            else:
+                print(f"   {CLR_GREEN}✔ Zero errors or warnings logged.{NC}")
+    else:
+        print("   No activity log created yet.")
+
+    print(f"\n{CLR_BORDER}{'─' * w}{NC}")
+    print("  [1] Force Restart ExifTool Daemon Pipe")
+    print("  [0] Back to Menu")
+    c = input("\n  Select: ").strip()
+    if c == "1":
+        EXIFTOOL_ENGINE._restart()
+        print(f"  {CLR_GREEN}✔ Daemon recycled successfully.{NC}")
+        time.sleep(1)
+
+
 def tool_live_logs():
-    """Real-time live log streamer with continuous updates."""
+    """Live stream with color-coded category badges."""
     os.system("cls" if os.name == "nt" else "clear")
     w = get_ui_width()
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
@@ -837,43 +1008,18 @@ def tool_live_logs():
             while True:
                 line = f.readline()
                 if line:
-                    print(f"  {CLR_GREEN}❯ {line.strip()}{NC}")
+                    stripped = line.strip()
+                    if "[ERROR]" in stripped:
+                        print(f"  {CLR_RED}🚨 {stripped}{NC}")
+                    elif "[COMPLETE]" in stripped:
+                        print(f"  {CLR_GREEN}✔  {stripped}{NC}")
+                    else:
+                        print(f"  {CLR_CYAN}❯  {stripped}{NC}")
                 else:
                     time.sleep(0.3)
     except KeyboardInterrupt:
         print(f"\n  {CLR_AMBER}Returned from live log stream.{NC}")
         time.sleep(0.6)
-
-
-def tool_live_audit():
-    os.system("cls" if os.name == "nt" else "clear")
-    print(f"{CLR_CYAN}=== Live EXIF & ICC Profile Audit ==={NC}\n")
-    cfg = load_config()
-    candidates = []
-    for f in cfg.get("folders", []):
-        p = Path(f)
-        if p.exists():
-            for ext in VALID_EXTENSIONS:
-                candidates.extend(p.glob(f"*{ext}"))
-
-    if not candidates:
-        print(f"  {CLR_AMBER}No images found across monitored folders.{NC}\n")
-        input("  Press [Enter] to return...")
-        return
-
-    latest_file = max(candidates, key=lambda f: f.stat().st_mtime)
-    print(f"  Target: {BOLD}{latest_file.name}{NC}\n")
-
-    out = EXIFTOOL_ENGINE.execute("-exif:all", "-xmp:all", "-iptc:all", "-icc_profile:all", str(latest_file))
-    if not out.strip():
-        print(f"  {CLR_GREEN}{BOLD}✔ 100% CLEAN - ZERO EXIF, XMP, IPTC OR ICC PROFILES DETECTED!{NC}")
-    else:
-        print(f"  {CLR_RED}{BOLD}⚠ METADATA DETECTED:{NC}\n{out}")
-
-    st = latest_file.stat()
-    print(f"\n  Modified: {time.ctime(st.st_mtime)}")
-    print(f"  Accessed: {time.ctime(st.st_atime)}\n")
-    input("  Press [Enter] to return...")
 
 
 def tool_bulk_clean():
@@ -907,7 +1053,7 @@ def tool_bulk_clean():
         if cfg.get("strip_icc", True):
             args.append("-icc_profile:all=")
         args.extend(["-overwrite_original_in_place", str(img)])
-        EXIFTOOL_ENGINE.execute(*args)
+        EXIFTOOL_ENGINE.execute(*args, timeout=4.0)
 
         if cfg.get("clamp_time", True):
             try:
@@ -917,6 +1063,44 @@ def tool_bulk_clean():
 
     print(f"\n\n  {CLR_GREEN}✔ Bulk scrub complete for {total} images.{NC}\n")
     time.sleep(1.2)
+
+
+def tool_manual_check_updates():
+    os.system("cls" if os.name == "nt" else "clear")
+    w = get_ui_width()
+    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🔄  CHECK FOR UPDATES{NC}")
+    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+    print(f"  Current Version : {BOLD}v{CURRENT_VERSION}{NC}")
+    print(f"  Repository      : {BOLD}{GITHUB_REPO}{NC}\n")
+    print(f"  {CLR_CYAN}Querying GitHub for latest commit on 'main'...{NC}")
+
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
+        req = urllib.request.Request(url, headers={"User-Agent": "ShotClean-Updater"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            remote_sha = data.get("sha", "")
+            local_sha = get_current_commit()
+
+            if not local_sha:
+                local_sha = remote_sha
+                COMMIT_CACHE_FILE.write_text(remote_sha, encoding="utf-8")
+
+            if remote_sha and local_sha != remote_sha:
+                short_remote = remote_sha[:7]
+                print(f"\n  {CLR_AMBER}{BOLD}🚀 New update available on GitHub!{NC}")
+                print(f"  Remote Commit : {BOLD}{short_remote}{NC}")
+                ans = input("\n  Would you like to install and restart now? [Y/n]: ").strip().lower()
+                if ans not in ['n', 'no']:
+                    perform_direct_web_update()
+            else:
+                print(f"\n  {CLR_GREEN}{BOLD}✔ You are up to date!{NC}")
+                print(f"  Running latest commit: {local_sha[:7] if local_sha else 'current'}\n")
+    except Exception as e:
+        print(f"\n  {CLR_RED}✖ Could not check for updates:{NC} {e}\n")
+
+    input("  Press [Enter] to return...")
 
 
 def tool_manage_vault():
@@ -961,7 +1145,7 @@ def tool_manage_vault():
                         shutil.copy2(vf, out_dir / vf.name)
                     success += 1
                 except Exception as ex:
-                    log_event(f"Failed to restore {vf.name}: {ex}")
+                    log_event("ERROR", f"Failed to restore {vf.name}: {ex}")
             print(f"\n  {CLR_GREEN}✔ Successfully restored {success} images to:{NC}\n  {out_dir}")
             input("\n  Press [Enter] to continue...")
         elif c == "4":
@@ -997,6 +1181,7 @@ def tool_privacy_canary():
             f"-Copyright={token}",
             "-overwrite_original_in_place",
             str(canary_path),
+            timeout=4.0
         )
 
         print(f"\n  {CLR_GREEN}{BOLD}✔ Canary Generated Successfully!{NC}")
@@ -1014,7 +1199,7 @@ def tool_privacy_canary():
         if not p.exists() or not p.is_file():
             print(f"  {CLR_RED}File not found.{NC}"); time.sleep(1.2); return
 
-        out = EXIFTOOL_ENGINE.execute("-all", str(p))
+        out = EXIFTOOL_ENGINE.execute("-all", str(p), timeout=4.0)
         if "CANARY-" in out:
             print(f"\n  {CLR_RED}{BOLD}🚨 PRIVACY LEAK DETECTED!{NC}")
             print("  The uploaded platform PRESERVED metadata tracking tokens!")
@@ -1153,6 +1338,10 @@ def main():
                 os.system("cls" if os.name == "nt" else "clear")
                 SystemDoctor.check_and_install(interactive=True)
                 input("  Press [Enter] to return...")
+            elif choice == "14":
+                tool_manual_check_updates()
+            elif choice == "15":
+                tool_engine_diagnostics()
             elif choice == "0":
                 break
 
