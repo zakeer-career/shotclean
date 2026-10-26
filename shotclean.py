@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ShotClean Universal Studio v4.1
-Cross-platform metadata stripper with live GitHub update detection and 1-click upgrade.
+Cross-platform metadata stripper with live GitHub update detection,
+pre-flight diagnostics, and graceful exit handling.
 """
 
 import json
@@ -26,7 +27,7 @@ if platform.system() == "Windows":
 
 CURRENT_VERSION = "4.0.0"
 
-# CHANGE THIS to your GitHub username and repository:
+# Change this to your GitHub username and repository name:
 GITHUB_REPO = "your_username/shotclean"
 
 LATEST_VERSION = None
@@ -37,7 +38,7 @@ def check_updates_background():
     """Silently queries GitHub Releases API in the background."""
     global LATEST_VERSION, UPDATE_AVAILABLE
     if GITHUB_REPO == "your_username/shotclean":
-        return  # Skip if placeholder has not been replaced yet
+        return
 
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -52,7 +53,6 @@ def check_updates_background():
                 LATEST_VERSION = remote_tag
                 UPDATE_AVAILABLE = True
     except Exception:
-        # Fails silently if user is offline or GitHub rate-limits
         pass
 
 
@@ -64,7 +64,6 @@ def perform_git_update():
         if res.returncode == 0:
             print(f"  {CLR_GREEN}{BOLD}✔ Update successful! Restarting ShotClean...{NC}\n")
             time.sleep(1.2)
-            # Replaces the current process with the newly pulled code
             os.execv(sys.executable, [sys.executable] + sys.argv)
         else:
             print(f"  {CLR_RED}✖ Update failed:{NC}\n{res.stderr}")
@@ -74,7 +73,7 @@ def perform_git_update():
         input("  Press [Enter] to continue...")
 
 
-# Start background update check immediately on boot
+# Start background update check immediately
 threading.Thread(target=check_updates_background, daemon=True).start()
 
 # ==============================================================================
@@ -396,11 +395,10 @@ def draw_dashboard():
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
     print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}            {CLR_CYAN}│{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N${NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}            {CLR_CYAN}│{NC}")
     print(f"{CLR_CYAN}│{NC}  {DIM}Cross-Platform Privacy & Anti-Forensics Suite         {NC}{CLR_CYAN}│{NC}")
     print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}")
 
-    # LIVE UPDATE BANNER
     if UPDATE_AVAILABLE:
         print(f"{CLR_AMBER}╭────────────────────────────────────────────────────────╮{NC}")
         print(f"{CLR_AMBER}│{NC}  {BOLD}🔔 UPDATE AVAILABLE: v{LATEST_VERSION}{NC}                           {CLR_AMBER}│{NC}")
@@ -544,11 +542,17 @@ def tool_profiles():
     print("  [3] Preserve (Scrub only, keep filename)")
     c = input("\n  Select [1-3]: ").strip()
     if c == "1":
-        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = True
+        cfg["strip_exif"] = True
+        cfg["random_hash"] = True
+        cfg["clamp_time"] = True
     elif c == "2":
-        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = False
+        cfg["strip_exif"] = True
+        cfg["random_hash"] = True
+        cfg["clamp_time"] = False
     elif c == "3":
-        cfg["strip_exif"] = True; cfg["random_hash"] = False; cfg["clamp_time"] = False
+        cfg["strip_exif"] = True
+        cfg["random_hash"] = False
+        cfg["clamp_time"] = False
     else:
         return
     save_config(cfg)
@@ -563,50 +567,59 @@ def toggle_cfg(key: str):
 
 
 # ==============================================================================
-# MAIN LOOP
+# MAIN LOOP (GRACEFUL EXIT HANDLER)
 # ==============================================================================
 
 def main():
     DaemonManager.start()
 
-    while True:
-        draw_dashboard()
-        choice = input(" ❯ Select option: ").strip()
+    try:
+        while True:
+            draw_dashboard()
+            choice = input(" ❯ Select option: ").strip()
 
-        if choice.lower() == "u" and UPDATE_AVAILABLE:
-            perform_git_update()
-        elif choice == "1":
-            DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
-        elif choice == "2":
-            tool_manage_folders()
-        elif choice == "3":
-            tool_profiles()
-        elif choice == "4":
-            toggle_cfg("strip_exif")
-        elif choice == "5":
-            toggle_cfg("random_hash")
-        elif choice == "6":
-            toggle_cfg("clamp_time")
-        elif choice == "7":
-            toggle_cfg("enable_backup")
-        elif choice == "8":
-            tool_live_audit()
-        elif choice == "9":
-            tool_bulk_clean()
-        elif choice == "10":
-            os.system("cls" if os.name == "nt" else "clear")
-            if LOG_FILE.exists():
-                with open(LOG_FILE, "r", encoding="utf-8") as f:
-                    print("".join(f.readlines()[-25:]))
-            input("\n  Press [Enter] to return...")
-        elif choice == "11":
-            os.system("cls" if os.name == "nt" else "clear")
-            SystemDoctor.check_and_install(interactive=True)
-            input("  Press [Enter] to return...")
-        elif choice == "0":
-            DaemonManager.stop()
-            print(f"\n  {CLR_GREEN}Shutdown complete. Stay safe!{NC}\n")
-            sys.exit(0)
+            if choice.lower() == "u" and UPDATE_AVAILABLE:
+                perform_git_update()
+            elif choice == "1":
+                DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
+            elif choice == "2":
+                tool_manage_folders()
+            elif choice == "3":
+                tool_profiles()
+            elif choice == "4":
+                toggle_cfg("strip_exif")
+            elif choice == "5":
+                toggle_cfg("random_hash")
+            elif choice == "6":
+                toggle_cfg("clamp_time")
+            elif choice == "7":
+                toggle_cfg("enable_backup")
+            elif choice == "8":
+                tool_live_audit()
+            elif choice == "9":
+                tool_bulk_clean()
+            elif choice == "10":
+                os.system("cls" if os.name == "nt" else "clear")
+                if LOG_FILE.exists():
+                    with open(LOG_FILE, "r", encoding="utf-8") as f:
+                        print("".join(f.readlines()[-25:]))
+                input("\n  Press [Enter] to return...")
+            elif choice == "11":
+                os.system("cls" if os.name == "nt" else "clear")
+                SystemDoctor.check_and_install(interactive=True)
+                input("  Press [Enter] to return...")
+            elif choice == "0":
+                break
+
+    except (KeyboardInterrupt, EOFError):
+        # Gracefully handle Ctrl+C / Ctrl+D without dumping a traceback
+        print(f"\n\n  {CLR_AMBER}Interrupted. Exiting ShotClean...{NC}")
+
+    finally:
+        # Guarantee background observer thread terminates cleanly
+        DaemonManager.stop()
+        print(f"  {CLR_GREEN}Shutdown complete. Stay safe!{NC}\n")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
