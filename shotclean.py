@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ShotClean Universal Studio v4.1
-Cross-platform metadata stripper with live GitHub update detection,
-pre-flight diagnostics, and graceful exit handling.
+Cross-platform metadata stripper & anti-forensics suite.
+Repository: https://github.com/zakeer-career/shotclean
 """
 
 import json
@@ -22,62 +22,92 @@ if platform.system() == "Windows":
     os.system("")
 
 # ==============================================================================
-# VERSION & GITHUB UPDATE SYSTEM
+# GITHUB WEB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "4.0.1"
+CURRENT_VERSION = "4.1.0"
+GITHUB_REPO = "zakeer-career/shotclean"
 
-# Change this to your GitHub username and repository name:
-GITHUB_REPO = "your_username/shotclean"
-
-LATEST_VERSION = None
 UPDATE_AVAILABLE = False
+REMOTE_COMMIT_SHORT = ""
+REMOTE_SHA = ""
+
+HOME = Path.home()
+SHOTCLEAN_DIR = HOME / ".shotclean"
+COMMIT_CACHE_FILE = SHOTCLEAN_DIR / "installed_commit.txt"
+
+
+def get_current_commit():
+    if COMMIT_CACHE_FILE.exists():
+        try:
+            return COMMIT_CACHE_FILE.read_text().strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def check_updates_background():
-    """Silently queries GitHub Releases API in the background."""
-    global LATEST_VERSION, UPDATE_AVAILABLE
-    if GITHUB_REPO == "your_username/shotclean":
-        return
-
+    """Queries GitHub API to check for commits made on GitHub web."""
+    global UPDATE_AVAILABLE, REMOTE_COMMIT_SHORT, REMOTE_SHA
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
         req = urllib.request.Request(
-            url,
-            headers={"User-Agent": f"ShotClean/{CURRENT_VERSION}"}
+            url, headers={"User-Agent": "ShotClean-Updater"}
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode())
-            remote_tag = data.get("tag_name", "").lstrip("v")
-            if remote_tag and remote_tag != CURRENT_VERSION:
-                LATEST_VERSION = remote_tag
+            REMOTE_SHA = data.get("sha", "")
+            local_sha = get_current_commit()
+
+            # Record initial commit on first launch
+            if not local_sha and REMOTE_SHA:
+                COMMIT_CACHE_FILE.write_text(REMOTE_SHA)
+                return
+
+            # Flag update if remote commit differs from local
+            if REMOTE_SHA and local_sha != REMOTE_SHA:
+                REMOTE_COMMIT_SHORT = REMOTE_SHA[:7]
                 UPDATE_AVAILABLE = True
     except Exception:
         pass
 
 
-def perform_git_update():
-    """Runs git pull and re-launches the script automatically."""
-    print(f"\n  {CLR_CYAN}Pulling latest updates from GitHub...{NC}")
+def perform_direct_web_update():
+    """Downloads raw shotclean.py directly from GitHub and reloads."""
+    print(f"\n  {CLR_CYAN}Downloading latest version from GitHub...{NC}")
     try:
-        res = subprocess.run(["git", "pull"], capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"  {CLR_GREEN}{BOLD}✔ Update successful! Restarting ShotClean...{NC}\n")
-            time.sleep(1.2)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        else:
-            print(f"  {CLR_RED}✖ Update failed:{NC}\n{res.stderr}")
+        raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/shotclean.py"
+        req = urllib.request.Request(
+            raw_url, headers={"User-Agent": "ShotClean-Updater"}
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            new_code = resp.read().decode("utf-8")
+
+        if "ShotClean" not in new_code:
+            print(f"  {CLR_RED}✖ Received invalid file. Aborting.{NC}")
             input("  Press [Enter] to continue...")
+            return
+
+        current_script = Path(__file__).resolve()
+        current_script.write_text(new_code, encoding="utf-8")
+
+        if REMOTE_SHA:
+            COMMIT_CACHE_FILE.write_text(REMOTE_SHA)
+
+        print(f"  {CLR_GREEN}{BOLD}✔ Updated successfully! Restarting...{NC}\n")
+        time.sleep(1.2)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
     except Exception as e:
-        print(f"  {CLR_RED}✖ Git command failed: {e}{NC}")
+        print(f"  {CLR_RED}✖ Update failed: {e}{NC}")
         input("  Press [Enter] to continue...")
 
 
-# Start background update check immediately
+# Start update check immediately in background thread
 threading.Thread(target=check_updates_background, daemon=True).start()
 
 # ==============================================================================
-# STYLING & CORE CONFIGURATION
+# UI PALETTE & DIRECTORIES
 # ==============================================================================
 
 CLR_CYAN = "\033[38;5;51m"
@@ -95,8 +125,6 @@ NC = "\033[0m"
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
-HOME = Path.home()
-SHOTCLEAN_DIR = HOME / ".shotclean"
 CONFIG_FILE = SHOTCLEAN_DIR / "config.json"
 LOG_FILE = SHOTCLEAN_DIR / "activity.log"
 VAULT_DIR = SHOTCLEAN_DIR / "vault"
@@ -152,7 +180,7 @@ def log_event(msg: str):
 
 
 # ==============================================================================
-# SYSTEM DOCTOR
+# SYSTEM DOCTOR (AUTO-INSTALLER)
 # ==============================================================================
 
 class SystemDoctor:
@@ -186,7 +214,7 @@ class SystemDoctor:
             return False
 
         print(f"\n{CLR_CYAN}╭──────────────────────────────────────────────────────╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  {BOLD}🩺  SHOTCLEAN · Dependency Diagnostic Check{NC}        {CLR_CYAN}│{NC}")
+        print(f"{CLR_CYAN}│{NC}  {BOLD}🩺  SHOTCLEAN · System Health & Pre-Flight Check{NC}   {CLR_CYAN}│{NC}")
         print(f"{CLR_CYAN}╰──────────────────────────────────────────────────────╯{NC}")
         print(f"  {CLR_GRAY}Detected OS:{NC} {BOLD}{cls.get_os_string()}{NC}\n")
 
@@ -196,12 +224,12 @@ class SystemDoctor:
             print(f"  {CLR_GREEN}[✔]{NC} Python library: 'watchdog' (Installed)")
 
         if missing_bins:
-            print(f"  {CLR_RED}[✖]{NC} Core binary   : 'exiftool' {CLR_AMBER}(Missing from PATH){NC}")
+            print(f"  {CLR_RED}[✖]{NC} Core engine   : 'exiftool' {CLR_AMBER}(Missing from PATH){NC}")
         else:
-            print(f"  {CLR_GREEN}[✔]{NC} Core binary   : 'exiftool' (Installed)")
+            print(f"  {CLR_GREEN}[✔]{NC} Core engine   : 'exiftool' (Installed)")
 
-        print(f"\n  {CLR_AMBER}{BOLD}Action Needed:{NC} Dependencies required.")
-        choice = input("  Install them automatically now? [Y/n]: ").strip().lower()
+        print(f"\n  {CLR_AMBER}{BOLD}Action Required:{NC} Dependencies need to be installed.")
+        choice = input("  Install automatically now? [Y/n]: ").strip().lower()
 
         if choice in ["n", "no"]:
             print(f"\n  {CLR_RED}Dependencies missing. Exiting...{NC}")
@@ -212,7 +240,7 @@ class SystemDoctor:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "watchdog"])
 
         if "exiftool" in missing_bins:
-            print(f"\n  {CLR_CYAN}Installing 'exiftool' via system package manager...{NC}")
+            print(f"\n  {CLR_CYAN}Installing 'exiftool' for {cls.get_os_string()}...{NC}")
             os_name = cls.get_os_string()
             try:
                 if "Android" in os_name:
@@ -230,13 +258,13 @@ class SystemDoctor:
                 elif shutil.which("pacman"):
                     subprocess.check_call(["sudo", "pacman", "-S", "--noconfirm", "perl-image-exiftool"])
                 else:
-                    print(f"  {CLR_RED}No supported package manager found. Please install exiftool manually.{NC}")
+                    print(f"  {CLR_RED}No compatible package manager found. Please install exiftool manually.{NC}")
                     sys.exit(1)
             except Exception as e:
-                print(f"  {CLR_RED}Auto-install error: {e}{NC}")
+                print(f"  {CLR_RED}Installation error: {e}{NC}")
                 sys.exit(1)
 
-        print(f"\n  {CLR_GREEN}{BOLD}✔ All tools successfully installed!{NC}\n")
+        print(f"\n  {CLR_GREEN}{BOLD}✔ All dependencies verified!{NC}\n")
         time.sleep(1)
         return True
 
@@ -247,7 +275,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # ==============================================================================
-# SANITIZER & WATCHER ENGINE
+# MONITORING ENGINE & FILE SANITIZER
 # ==============================================================================
 
 def is_file_ready(filepath: Path, timeout: float = 3.5) -> bool:
@@ -285,6 +313,7 @@ def process_image_file(filepath: Path):
 
     time.sleep(0.1)
 
+    # 1. Backup Vault
     if cfg.get("enable_backup", False):
         try:
             backup_name = f"{filepath.stem}_{int(time.time())}{filepath.suffix}"
@@ -292,6 +321,7 @@ def process_image_file(filepath: Path):
         except Exception:
             pass
 
+    # 2. ExifTool In-Place Scrub
     if cfg.get("strip_exif", True):
         try:
             subprocess.run(
@@ -306,6 +336,7 @@ def process_image_file(filepath: Path):
 
     target_path = filepath
 
+    # 3. Hash Renaming
     if cfg.get("random_hash", True):
         rand_token = uuid.uuid4().hex[:12]
         new_name = f"{prefix}{rand_token}{filepath.suffix.lower()}"
@@ -315,6 +346,7 @@ def process_image_file(filepath: Path):
         except OSError:
             target_path = filepath
 
+    # 4. Anti-Forensic Timestamp Clamping (2020-01-01)
     if cfg.get("clamp_time", True):
         try:
             epoch_2020 = 1577836800.0
@@ -322,6 +354,7 @@ def process_image_file(filepath: Path):
         except OSError:
             pass
 
+    # Android MediaStore Broadcast
     if "com.termux" in os.environ.get("PREFIX", ""):
         subprocess.run(
             ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{target_path}"],
@@ -361,7 +394,7 @@ class DaemonManager:
 
         cls.observer.start()
         cls.is_running = True
-        log_event(f"Engine started. Monitoring {len(valid_folders)} folder(s).")
+        log_event(f"Daemon started. Monitoring {len(valid_folders)} directory(s).")
 
     @classmethod
     def stop(cls):
@@ -371,7 +404,7 @@ class DaemonManager:
         cls.observer.join()
         cls.is_running = False
         cls.observer = None
-        log_event("Engine stopped.")
+        log_event("Daemon stopped.")
 
     @classmethod
     def restart(cls):
@@ -381,7 +414,7 @@ class DaemonManager:
 
 
 # ==============================================================================
-# UI DASHBOARD & TOOLS
+# DASHBOARD INTERFACE
 # ==============================================================================
 
 def pill(val: bool) -> str:
@@ -395,20 +428,20 @@ def draw_dashboard():
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
     print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
-    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N${NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}            {CLR_CYAN}│{NC}")
-    print(f"{CLR_CYAN}│{NC}  {DIM}Cross-Platform Privacy & Anti-Forensics Suite         {NC}{CLR_CYAN}│{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N${NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}Universal Studio v{CURRENT_VERSION}{NC}        {CLR_CYAN}│{NC}")
+    print(f"{CLR_CYAN}│{NC}  {DIM}Automated Metadata Stripper & Anti-Forensics          {NC}{CLR_CYAN}│{NC}")
     print(f"{CLR_CYAN}╰────────────────────────────────────────────────────────╯{NC}")
 
     if UPDATE_AVAILABLE:
         print(f"{CLR_AMBER}╭────────────────────────────────────────────────────────╮{NC}")
-        print(f"{CLR_AMBER}│{NC}  {BOLD}🔔 UPDATE AVAILABLE: v{LATEST_VERSION}{NC}                           {CLR_AMBER}│{NC}")
-        print(f"{CLR_AMBER}│{NC}  Press {CLR_CYAN}[U]{NC} to pull and install update automatically     {CLR_AMBER}│{NC}")
+        print(f"{CLR_AMBER}│{NC}  {BOLD}🔔 NEW UPDATE READY{NC}  {CLR_GRAY}(Commit: {REMOTE_COMMIT_SHORT}){NC}                 {CLR_AMBER}│{NC}")
+        print(f"{CLR_AMBER}│{NC}  Press {CLR_CYAN}[U]{NC} to pull and reload automatically          {CLR_AMBER}│{NC}")
         print(f"{CLR_AMBER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_BLUE}{BOLD}SYSTEM HEALTH{NC}{CLR_BORDER} ───────────────────────────────────────╮{NC}")
     print(f"{CLR_BORDER}│{NC}  OS Environment :  {BOLD}{SystemDoctor.get_os_string()}{NC}")
     print(f"{CLR_BORDER}│{NC}  Engine Status  :  {status_text}")
-    print(f"{CLR_BORDER}│{NC}  Watched Paths  :  {BOLD}{folder_count} directory registered{NC}")
+    print(f"{CLR_BORDER}│{NC}  Watched Paths  :  {BOLD}{folder_count} folder(s) registered{NC}")
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_AMBER}{BOLD}PRIVACY SHIELD STATUS{NC}{CLR_BORDER} ───────────────────────────────╮{NC}")
@@ -417,7 +450,7 @@ def draw_dashboard():
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
     print(f"{CLR_BORDER}╭── {CLR_WHITE}{BOLD}CONTROLS & CONFIGURATION{NC}{CLR_BORDER} ────────────────────────────╮{NC}")
-    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[1]{NC} ⚡ Toggle Engine ({'Halt' if DaemonManager.is_running else 'Start'})")
+    print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[1]{NC} ⚡ Toggle Daemon ({'Halt' if DaemonManager.is_running else 'Start'})")
     print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[2]{NC} 📁 Manage Monitored Folders")
     print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[3]{NC} 🎭 Privacy Profiles (Ghost / Balanced / Preserve)")
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
@@ -431,7 +464,7 @@ def draw_dashboard():
     print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[8]{NC} 🔍 Live EXIF Audit      {CLR_CYAN}[9]{NC} 🧹 Bulk Clean Folders")
     print(f"{CLR_BORDER}│{NC}  {CLR_CYAN}[10]{NC} 📜 Activity Logs       {CLR_CYAN}[11]{NC} 🩺 System Doctor")
     if UPDATE_AVAILABLE:
-        print(f"{CLR_BORDER}│{NC}  {CLR_AMBER}[U]  🚀 Update to v{LATEST_VERSION}{NC}")
+        print(f"{CLR_BORDER}│{NC}  {CLR_AMBER}[U]  🚀 Update to latest commit ({REMOTE_COMMIT_SHORT}){NC}")
     print(f"{CLR_BORDER}│{NC}  {CLR_RED}[0]   🚪 Exit Suite{NC}")
     print(f"{CLR_BORDER}╰────────────────────────────────────────────────────────╯{NC}")
 
@@ -448,7 +481,7 @@ def tool_live_audit():
                 candidates.extend(p.glob(f"*{ext}"))
 
     if not candidates:
-        print(f"  {CLR_AMBER}No images found to audit.{NC}\n")
+        print(f"  {CLR_AMBER}No images found across monitored folders.{NC}\n")
         input("  Press [Enter] to return...")
         return
 
@@ -462,7 +495,7 @@ def tool_live_audit():
     if not res.stdout.strip():
         print(f"  {CLR_GREEN}{BOLD}✔ 100% CLEAN - ZERO METADATA DETECTED!{NC}")
     else:
-        print(f"  {CLR_RED}{BOLD}⚠ LEAKS DETECTED:{NC}\n{res.stdout}")
+        print(f"  {CLR_RED}{BOLD}⚠ METADATA DETECTED:{NC}\n{res.stdout}")
 
     st = latest_file.stat()
     print(f"\n  Modified: {time.ctime(st.st_mtime)}")
@@ -491,7 +524,7 @@ def tool_bulk_clean():
                     if cfg.get("clamp_time", True):
                         os.utime(img, (1577836800.0, 1577836800.0))
                     count += 1
-    print(f"\n  {CLR_GREEN}✔ Scrubbed {count} images.{NC}\n")
+    print(f"\n  {CLR_GREEN}✔ Cleaned {count} images.{NC}\n")
     time.sleep(1.2)
 
 
@@ -536,23 +569,17 @@ def tool_manage_folders():
 def tool_profiles():
     os.system("cls" if os.name == "nt" else "clear")
     cfg = load_config()
-    print(f"{CLR_CYAN}=== Profiles ==={NC}\n")
+    print(f"{CLR_CYAN}=== Privacy Profiles ==={NC}\n")
     print("  [1] Ghost (Scrub + Rename + Time Clamp)")
     print("  [2] Balanced (Scrub + Rename)")
-    print("  [3] Preserve (Scrub only, keep filename)")
+    print("  [3] Preserve (Scrub only, keep original name)")
     c = input("\n  Select [1-3]: ").strip()
     if c == "1":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = True
-        cfg["clamp_time"] = True
+        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = True
     elif c == "2":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = True
-        cfg["clamp_time"] = False
+        cfg["strip_exif"] = True; cfg["random_hash"] = True; cfg["clamp_time"] = False
     elif c == "3":
-        cfg["strip_exif"] = True
-        cfg["random_hash"] = False
-        cfg["clamp_time"] = False
+        cfg["strip_exif"] = True; cfg["random_hash"] = False; cfg["clamp_time"] = False
     else:
         return
     save_config(cfg)
@@ -567,7 +594,7 @@ def toggle_cfg(key: str):
 
 
 # ==============================================================================
-# MAIN LOOP (GRACEFUL EXIT HANDLER)
+# MAIN EVENT LOOP
 # ==============================================================================
 
 def main():
@@ -579,7 +606,7 @@ def main():
             choice = input(" ❯ Select option: ").strip()
 
             if choice.lower() == "u" and UPDATE_AVAILABLE:
-                perform_git_update()
+                perform_direct_web_update()
             elif choice == "1":
                 DaemonManager.stop() if DaemonManager.is_running else DaemonManager.start()
             elif choice == "2":
@@ -612,11 +639,9 @@ def main():
                 break
 
     except (KeyboardInterrupt, EOFError):
-        # Gracefully handle Ctrl+C / Ctrl+D without dumping a traceback
         print(f"\n\n  {CLR_AMBER}Interrupted. Exiting ShotClean...{NC}")
 
     finally:
-        # Guarantee background observer thread terminates cleanly
         DaemonManager.stop()
         print(f"  {CLR_GREEN}Shutdown complete. Stay safe!{NC}\n")
         sys.exit(0)
