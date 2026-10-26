@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v4.3.0
+ShotClean Universal Studio v4.4.0
 Cross-platform metadata stripper, anti-forensics suite & automated privacy shield.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import queue
+import select
 import shutil
 import struct
 import subprocess
@@ -30,7 +31,7 @@ if platform.system() == "Windows":
 # VERSION & GITHUB WEB AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "4.3.0"
+CURRENT_VERSION = "4.4.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -59,7 +60,6 @@ def get_current_commit():
 
 
 def check_updates_background():
-    """Queries GitHub API to check for commits made on GitHub web."""
     global UPDATE_AVAILABLE, REMOTE_COMMIT_SHORT, REMOTE_SHA
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
@@ -81,7 +81,6 @@ def check_updates_background():
 
 
 def perform_direct_web_update():
-    """Downloads raw script directly from GitHub and restarts."""
     print(f"\n  {CLR_CYAN}Downloading latest update from GitHub...{NC}")
     try:
         raw_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/shotclean.py"
@@ -210,11 +209,144 @@ def log_event(msg: str):
 
 
 # ==============================================================================
-# FEATURE 1: HIGH-SPEED EXIFTOOL PERSISTENT DAEMON (-stay_open)
+# KEYBOARD INPUT READER (ARROW KEYS & RAW TERMINAL)
+# ==============================================================================
+
+def read_single_key():
+    """Reads arrow keys and single keypresses across Linux, Termux, and Windows."""
+    if platform.system() == "Windows":
+        import msvcrt
+        ch = msvcrt.getch()
+        if ch in (b'\x00', b'\xe0'):
+            code = msvcrt.getch()
+            if code == b'H': return "UP"
+            elif code == b'P': return "DOWN"
+        elif ch in (b'\r', b'\n'):
+            return "ENTER"
+        elif ch in (b'q', b'Q'):
+            return "QUIT"
+        return ch.decode('latin1', errors='ignore')
+    else:
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                r, _, _ = select.select([sys.stdin], [], [], 0.08)
+                if r:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 in ('[', 'O'):
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'A': return "UP"
+                        elif ch3 == 'B': return "DOWN"
+                return "ESC"
+            elif ch in ('\r', '\n'):
+                return "ENTER"
+            elif ch in ('k', 'K'):
+                return "UP"
+            elif ch in ('j', 'J'):
+                return "DOWN"
+            elif ch in ('q', 'Q'):
+                return "QUIT"
+            elif ch == '\x03':  # Ctrl+C
+                raise KeyboardInterrupt
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+# ==============================================================================
+# INTERACTIVE ARROW-KEY FOLDER BROWSER
+# ==============================================================================
+
+def interactive_folder_browser(start_dir: Path = None) -> Path:
+    """Browse directories with Up/Down arrow keys and select with Enter."""
+    if start_dir is None or not start_dir.exists():
+        if Path("/storage/emulated/0").exists():
+            cur_dir = Path("/storage/emulated/0")
+        else:
+            cur_dir = Path.home()
+    else:
+        cur_dir = start_dir.resolve()
+
+    cursor = 0
+    offset = 0
+    page_size = 8
+
+    while True:
+        items = ["✔ [CHOOSE THIS FOLDER]"]
+        root_parent = Path("/storage/emulated/0") if Path("/storage/emulated/0").exists() else Path.home()
+        if cur_dir != root_parent and cur_dir != cur_dir.parent:
+            items.append("⬆ [.. Go Up / Parent Folder]")
+
+        subdirs = []
+        try:
+            for entry in sorted(cur_dir.iterdir()):
+                if entry.is_dir() and not entry.name.startswith("."):
+                    subdirs.append(f"📁 {entry.name}")
+        except PermissionError:
+            subdirs.append("⚠️ [Permission Denied]")
+
+        items.extend(subdirs)
+        total = len(items)
+
+        if cursor >= total: cursor = max(0, total - 1)
+        if cursor < 0: cursor = 0
+
+        if cursor < offset:
+            offset = cursor
+        elif cursor >= offset + page_size:
+            offset = cursor - page_size + 1
+
+        os.system("cls" if os.name == "nt" else "clear")
+        w = get_ui_width()
+        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+        print(f"{CLR_CYAN}│{NC}  {BOLD}📁  INTERACTIVE FOLDER NAVIGATOR{NC}")
+        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
+        print(f"  {CLR_GRAY}Path:{NC} {CLR_AMBER}{BOLD}{truncate_middle(str(cur_dir), w - 10)}{NC}")
+        print(f"  {CLR_BLUE}Controls: [↑/↓ or j/k] Move · [Enter] Open/Pick · [q] Cancel{NC}")
+        print(f"{CLR_BORDER}{'─' * w}{NC}")
+
+        end_idx = min(offset + page_size, total)
+        for i in range(offset, end_idx):
+            item_text = items[i]
+            if i == cursor:
+                print(f"  {CLR_GREEN}{BOLD}▶ {item_text}{NC}")
+            else:
+                print(f"    {CLR_GRAY}{item_text}{NC}")
+
+        print(f"{CLR_BORDER}{'─' * w}{NC}")
+        print(f"  {DIM}Item {cursor + 1} of {total}{NC}")
+
+        key = read_single_key()
+        if key == "UP":
+            cursor = (cursor - 1) % total
+        elif key == "DOWN":
+            cursor = (cursor + 1) % total
+        elif key == "ENTER":
+            chosen = items[cursor]
+            if chosen == "✔ [CHOOSE THIS FOLDER]":
+                return cur_dir
+            elif chosen == "⬆ [.. Go Up / Parent Folder]":
+                cur_dir = cur_dir.parent
+                cursor = 0
+                offset = 0
+            elif chosen.startswith("📁 "):
+                sub_name = chosen[3:]
+                cur_dir = cur_dir / sub_name
+                cursor = 0
+                offset = 0
+        elif key in ("QUIT", "ESC"):
+            return None
+
+
+# ==============================================================================
+# PERSISTENT EXIFTOOL DAEMON (-stay_open)
 # ==============================================================================
 
 class ExifToolDaemon:
-    """Maintains a persistent ExifTool process to avoid process spawn overhead."""
     def __init__(self):
         self.proc = None
         self.lock = threading.Lock()
@@ -276,11 +408,10 @@ class ExifToolDaemon:
 EXIFTOOL_ENGINE = ExifToolDaemon()
 
 # ==============================================================================
-# FEATURE 2: PURE-PYTHON AUTHENTICATED VAULT ENCRYPTION
+# VAULT ENCRYPTION & CANARY GENERATOR
 # ==============================================================================
 
 def get_vault_secret() -> str:
-    """Retrieves or creates a secure local vault passphrase."""
     if VAULT_KEY_FILE.exists():
         try:
             return VAULT_KEY_FILE.read_text(encoding="utf-8").strip()
@@ -292,7 +423,6 @@ def get_vault_secret() -> str:
 
 
 def encrypt_payload(data: bytes, key: str) -> bytes:
-    """Authenticated CTR keystream encryption with 100k-iteration PBKDF2."""
     salt = os.urandom(16)
     derived = hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), salt, 100000)
     nonce = os.urandom(12)
@@ -309,7 +439,6 @@ def encrypt_payload(data: bytes, key: str) -> bytes:
 
 
 def decrypt_payload(data: bytes, key: str) -> bytes:
-    """Verifies authentication tag and decrypts ciphertext."""
     if not data.startswith(b"ENC1"):
         raise ValueError("Invalid format: Not an encrypted ShotClean vault archive.")
     salt = data[4:20]
@@ -319,7 +448,7 @@ def decrypt_payload(data: bytes, key: str) -> bytes:
     derived = hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), salt, 100000)
     expected_tag = hashlib.sha256(derived + salt + nonce + ciphertext).digest()
     if not hmac.compare_digest(tag, expected_tag):
-        raise ValueError("Decryption failed: Integrity check mismatch or invalid key.")
+        raise ValueError("Decryption failed: Integrity check mismatch.")
     out = bytearray(len(ciphertext))
     block_idx = 0
     for i in range(0, len(ciphertext), 32):
@@ -331,12 +460,7 @@ def decrypt_payload(data: bytes, key: str) -> bytes:
     return bytes(out)
 
 
-# ==============================================================================
-# FEATURE 4: METADATA CANARY GENERATOR
-# ==============================================================================
-
 def create_synthetic_png(target_path: Path):
-    """Generates a valid 200x200 solid PNG without requiring Pillow."""
     width, height = 200, 200
     raw_scanlines = b"".join(b"\x00" + b"\x1e\x88\xe5" * width for _ in range(height))
     compressed_idat = zlib.compress(raw_scanlines)
@@ -451,7 +575,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # ==============================================================================
-# NON-BLOCKING SANITIZATION WORKER QUEUE
+# SANITIZATION WORKER QUEUE
 # ==============================================================================
 
 WORK_QUEUE = queue.Queue()
@@ -494,30 +618,25 @@ def sanitization_worker():
             if not file_settling_probe(filepath):
                 continue
 
-            # Anti-reentrancy check
             file_key = f"{filepath.name}_{filepath.stat().st_size}"
             now = time.time()
             if file_key in PROCESSED_COOLDOWN and (now - PROCESSED_COOLDOWN[file_key]) < 4.0:
                 continue
             PROCESSED_COOLDOWN[file_key] = now
 
-            # 1. Encrypted or Plain Backup Vault
             if cfg.get("enable_backup", False):
                 try:
                     raw_bytes = filepath.read_bytes()
-                    timestamp_token = int(time.time())
+                    t_token = int(time.time())
                     if cfg.get("encrypt_vault", True):
-                        secret = get_vault_secret()
-                        enc_data = encrypt_payload(raw_bytes, secret)
-                        v_target = VAULT_DIR / f"{filepath.stem}_{timestamp_token}.enc"
-                        v_target.write_bytes(enc_data)
+                        sec = get_vault_secret()
+                        enc = encrypt_payload(raw_bytes, sec)
+                        (VAULT_DIR / f"{filepath.stem}_{t_token}.enc").write_bytes(enc)
                     else:
-                        v_target = VAULT_DIR / f"{filepath.stem}_{timestamp_token}{filepath.suffix}"
-                        v_target.write_bytes(raw_bytes)
+                        (VAULT_DIR / f"{filepath.stem}_{t_token}{filepath.suffix}").write_bytes(raw_bytes)
                 except Exception as ex:
                     log_event(f"Backup failed for {filepath.name}: {ex}")
 
-            # 2. ExifTool Scrubbing (Hardware EXIF + ICC Color Profiles)
             if cfg.get("strip_exif", True):
                 args = ["-all="]
                 if cfg.get("strip_icc", True):
@@ -527,7 +646,6 @@ def sanitization_worker():
 
             target_path = filepath
 
-            # 3. Hash Renaming
             if cfg.get("random_hash", True):
                 rand_token = uuid.uuid4().hex[:12]
                 new_name = f"{prefix}{rand_token}{filepath.suffix.lower()}"
@@ -537,7 +655,6 @@ def sanitization_worker():
                 except OSError:
                     target_path = filepath
 
-            # 4. Anti-Forensic Timestamp Clamping (2020-01-01)
             if cfg.get("clamp_time", True):
                 try:
                     epoch_2020 = 1577836800.0
@@ -545,7 +662,6 @@ def sanitization_worker():
                 except OSError:
                     pass
 
-            # 5. Refresh Android Media Scanner
             if "com.termux" in os.environ.get("PREFIX", ""):
                 subprocess.run(
                     ["am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{target_path}"],
@@ -556,7 +672,7 @@ def sanitization_worker():
             log_event(f"Sanitized: {filepath.name} -> {target_path.name}")
 
         except Exception as ex:
-            log_event(f"Worker exception: {ex}")
+            log_event(f"Worker error: {ex}")
         finally:
             WORK_QUEUE.task_done()
 
@@ -599,7 +715,7 @@ class DaemonManager:
 
         cls.observer.start()
         cls.is_running = True
-        log_event(f"Daemon started. Monitoring {len(valid_folders)} folder(s).")
+        log_event(f"Daemon active. Watching {len(valid_folders)} folder(s).")
 
     @classmethod
     def stop(cls):
@@ -643,7 +759,6 @@ def draw_dashboard():
     folder_count = len(cfg.get("folders", []))
     status_text = f"{CLR_GREEN}● RUNNING{NC}" if DaemonManager.is_running else f"{CLR_RED}○ STOPPED{NC}"
 
-    # Header
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
     print(f"{CLR_CYAN}│{NC}  {BOLD}🛡️  S H O T C L E A N{NC}  {CLR_GRAY}·{NC}  {CLR_PURPLE}v{CURRENT_VERSION} Studio{NC}")
     print(f"{CLR_CYAN}│{NC}  {DIM}High-Speed Privacy & Anti-Forensic Defense Suite{NC}")
@@ -654,7 +769,6 @@ def draw_dashboard():
         print(f"{CLR_AMBER}│{NC}  Commit: {BOLD}{REMOTE_COMMIT_SHORT}{NC} · Press {CLR_CYAN}[U]{NC} to update")
         print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
 
-    # Health Card
     draw_card(
         "SYSTEM HEALTH",
         [
@@ -666,7 +780,6 @@ def draw_dashboard():
         CLR_BLUE,
     )
 
-    # Privacy Status Card
     vault_status = "[ 🔐 ENC ]" if cfg.get("encrypt_vault", True) else "[ 🟢 RAW ]"
     if not cfg.get("enable_backup", False):
         vault_status = "[ ⚪ OFF ]"
@@ -681,16 +794,16 @@ def draw_dashboard():
         CLR_AMBER,
     )
 
-    # Controls & Menu
     draw_card(
         "CONTROLS & TOOLS",
         [
             f"{CLR_CYAN}[1]{NC} ⚡ Toggle Daemon ({'Halt' if DaemonManager.is_running else 'Start'})",
-            f"{CLR_CYAN}[2]{NC} 📁 Manage Folders     {CLR_CYAN}[3]{NC} 🎭 Privacy Profiles",
+            f"{CLR_CYAN}[2]{NC} 📁 Manage Folders {CLR_GREEN}(Arrow Navigator){NC}",
+            f"{CLR_CYAN}[3]{NC} 🎭 Privacy Profiles",
             f"{CLR_CYAN}[4]{NC} 🏷️  Toggle EXIF       {CLR_CYAN}[5]{NC} 🎨 Toggle ICC Profile",
             f"{CLR_CYAN}[6]{NC} 🎲 Toggle Hash Rename {CLR_CYAN}[7]{NC} ⏱️  Toggle Time Clamp",
             f"{CLR_CYAN}[8]{NC} 🔐 Manage Vault       {CLR_CYAN}[9]{NC} 🔍 Live EXIF Audit",
-            f"{CLR_CYAN}[10]{NC}🧹 Bulk Clean Folder   {CLR_CYAN}[11]{NC}📜 Activity Logs",
+            f"{CLR_CYAN}[10]{NC}🧹 Bulk Clean Folder   {CLR_CYAN}[11]{NC}📜 Live Stream Logs",
             f"{CLR_CYAN}[12]{NC}🐤 Privacy Canary Tool {CLR_CYAN}[13]{NC}🩺 System Doctor",
             f"{CLR_RED}[0]{NC}  🚪 Exit Suite" + (f"        {CLR_AMBER}[U] 🚀 Update{NC}" if UPDATE_AVAILABLE else ""),
         ],
@@ -699,8 +812,38 @@ def draw_dashboard():
 
 
 # ==============================================================================
-# AUDIT & MANAGEMENT TOOLS
+# AUDIT & TOOLS
 # ==============================================================================
+
+def tool_live_logs():
+    """Real-time live log streamer with continuous updates."""
+    os.system("cls" if os.name == "nt" else "clear")
+    w = get_ui_width()
+    print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+    print(f"{CLR_CYAN}│{NC}  {BOLD}📜  LIVE ACTIVITY LOG STREAM{NC}")
+    print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
+    print(f"  {CLR_AMBER}Streaming real-time events... (Press Ctrl+C to return){NC}\n")
+
+    if not LOG_FILE.exists():
+        LOG_FILE.touch()
+
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            for l in lines[-15:]:
+                print(f"  {CLR_GRAY}{l.strip()}{NC}")
+            f.seek(0, os.SEEK_END)
+
+            while True:
+                line = f.readline()
+                if line:
+                    print(f"  {CLR_GREEN}❯ {line.strip()}{NC}")
+                else:
+                    time.sleep(0.3)
+    except KeyboardInterrupt:
+        print(f"\n  {CLR_AMBER}Returned from live log stream.{NC}")
+        time.sleep(0.6)
+
 
 def tool_live_audit():
     os.system("cls" if os.name == "nt" else "clear")
@@ -832,7 +975,6 @@ def tool_manage_vault():
 
 
 def tool_privacy_canary():
-    """Generates synthetic canary images to test if external upload platforms strip EXIF."""
     os.system("cls" if os.name == "nt" else "clear")
     print(f"{CLR_CYAN}╭────────────────────────────────────────────────────────╮{NC}")
     print(f"{CLR_CYAN}│{NC}  {BOLD}🐤  PLATFORM PRIVACY CANARY TESTER{NC}                    {CLR_CYAN}│{NC}")
@@ -849,7 +991,6 @@ def tool_privacy_canary():
         canary_path = def_dir / f"test_canary_{token}.png"
         create_synthetic_png(canary_path)
 
-        # Inject detectable synthetic metadata
         EXIFTOOL_ENGINE.execute(
             f"-Artist={token}",
             f"-UserComment=CANARY_PRIVACY_AUDIT_{token}",
@@ -900,16 +1041,24 @@ def tool_manage_folders():
             status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Missing{NC}"
             disp = truncate_middle(f, w - 16)
             print(f"  [{i}] {disp} ({status})")
-        print(f"\n  [1] Add Custom Path   [2] Quick Preset   [3] Delete   [0] Back")
-        c = input("  Select: ").strip()
+        print(f"\n  {CLR_GREEN}[1] Browse with Arrow Keys [↑/↓]{NC}")
+        print(f"  [2] Quick Preset (Screenshots)")
+        print(f"  [3] Type Path Manually")
+        print(f"  [4] Delete Monitored Folder")
+        print(f"  [0] Back to Menu")
+        c = input("\n  Select [0-4]: ").strip()
 
         if c == "1":
-            p = Path(input("\n  Enter folder path: ").strip())
-            if p.exists() and p.is_dir() and str(p) not in folders:
-                folders.append(str(p))
-                cfg["folders"] = folders
-                save_config(cfg)
-                DaemonManager.restart()
+            chosen_dir = interactive_folder_browser()
+            if chosen_dir and chosen_dir.exists():
+                str_p = str(chosen_dir)
+                if str_p not in folders:
+                    folders.append(str_p)
+                    cfg["folders"] = folders
+                    save_config(cfg)
+                    DaemonManager.restart()
+                    print(f"\n  {CLR_GREEN}✔ Added: {chosen_dir.name}{NC}")
+                    time.sleep(1)
         elif c == "2":
             def_path = str(detect_default_folder())
             if def_path not in folders:
@@ -918,6 +1067,13 @@ def tool_manage_folders():
                 save_config(cfg)
                 DaemonManager.restart()
         elif c == "3":
+            p = Path(input("\n  Enter folder path: ").strip())
+            if p.exists() and p.is_dir() and str(p) not in folders:
+                folders.append(str(p))
+                cfg["folders"] = folders
+                save_config(cfg)
+                DaemonManager.restart()
+        elif c == "4":
             idx = input(f"  Index to remove [1-{len(folders)}]: ").strip()
             if idx.isdigit() and 1 <= int(idx) <= len(folders):
                 folders.pop(int(idx) - 1)
@@ -990,11 +1146,7 @@ def main():
             elif choice == "10":
                 tool_bulk_clean()
             elif choice == "11":
-                os.system("cls" if os.name == "nt" else "clear")
-                if LOG_FILE.exists():
-                    with open(LOG_FILE, "r", encoding="utf-8") as f:
-                        print("".join(f.readlines()[-25:]))
-                input("\n  Press [Enter] to return...")
+                tool_live_logs()
             elif choice == "12":
                 tool_privacy_canary()
             elif choice == "13":
