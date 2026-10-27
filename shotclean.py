@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v5.6.0
+ShotClean Universal Studio v5.7.0
 Cross-platform metadata stripper, anti-forensics suite & granular folder protection.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -61,7 +61,7 @@ def fetch_web_resource(url: str, timeout: float = 6.0) -> str:
 # VERSION & BULLETPROOF AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "5.6.0"
+CURRENT_VERSION = "5.7.0"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -72,6 +72,7 @@ HOME = Path.home()
 SHOTCLEAN_DIR = HOME / ".shotclean"
 COMMIT_CACHE_FILE = SHOTCLEAN_DIR / "installed_commit.txt"
 CONFIG_FILE = SHOTCLEAN_DIR / "config.json"
+LEDGER_FILE = SHOTCLEAN_DIR / "scrubbed_ledger.json"
 LOG_FILE = SHOTCLEAN_DIR / "activity.log"
 PID_FILE = SHOTCLEAN_DIR / "shotclean.pid"
 VAULT_DIR = SHOTCLEAN_DIR / "vault"
@@ -157,7 +158,15 @@ DIM = "\033[2m"
 NC = "\033[0m"
 
 VALID_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+EXTRA_MEDIA_EXTENSIONS = {".mp4", ".mov", ".pdf"}
+ALL_SUPPORTED_EXTENSIONS = VALID_EXTENSIONS | EXTRA_MEDIA_EXTENSIONS
 SESSION_CLEANED_COUNT = 0
+
+
+def get_valid_extensions_for_rules(rules: dict) -> set:
+    if rules.get("include_media_docs", False):
+        return ALL_SUPPORTED_EXTENSIONS
+    return VALID_EXTENSIONS
 
 
 def get_ui_width():
@@ -189,6 +198,68 @@ def detect_default_folder() -> Path:
     else:
         linux_path = HOME / "Pictures" / "Screenshots"
         return linux_path if linux_path.exists() else HOME / "Pictures"
+
+
+# ==============================================================================
+# PERSISTENT SCRUBBED-FILE LEDGER (PREVENTS RE-RENAMING ACROSS RESTARTS)
+# ==============================================================================
+
+LEDGER_LOCK = threading.Lock()
+
+
+def _load_ledger_unlocked() -> dict:
+    if LEDGER_FILE.exists():
+        try:
+            with open(LEDGER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
+
+
+def _save_ledger_unlocked(ledger: dict):
+    try:
+        if len(ledger) > 2000:
+            # Keep most recent 1500 entries
+            keys = list(ledger.keys())[-1500:]
+            ledger = {k: ledger[k] for k in keys}
+        with open(LEDGER_FILE, "w", encoding="utf-8") as f:
+            json.dump(ledger, f)
+    except Exception:
+        pass
+
+
+def is_file_in_ledger(filepath: Path) -> bool:
+    """Checks if file path with exact current size and mtime is already sanitized."""
+    try:
+        if not filepath.exists():
+            return False
+        st = filepath.stat()
+        key = str(filepath.resolve())
+        sig = [st.st_size, int(st.st_mtime)]
+        with LEDGER_LOCK:
+            ledger = _load_ledger_unlocked()
+            return ledger.get(key) == sig
+    except Exception:
+        return False
+
+
+def record_file_in_ledger(filepath: Path):
+    """Records sanitized file signature in persistent ledger."""
+    try:
+        if not filepath.exists():
+            return
+        st = filepath.stat()
+        key = str(filepath.resolve())
+        sig = [st.st_size, int(st.st_mtime)]
+        with LEDGER_LOCK:
+            ledger = _load_ledger_unlocked()
+            ledger[key] = sig
+            _save_ledger_unlocked(ledger)
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -236,22 +307,48 @@ def send_system_notification(title: str, msg: str):
 
 
 # ==============================================================================
-# SCORCHED EARTH PIXEL-LEVEL CANVASS RE-ENCODING
+# SCORCHED EARTH PIXEL RE-ENCODING & SUB-PERCEPTUAL PIXEL DITHERING
 # ==============================================================================
 
-def reencode_scorched_earth(filepath: Path) -> bool:
-    """Demuxes raw image data and drops trailing bytes/unauthorized chunks."""
+def reencode_scorched_earth(filepath: Path, pixel_dither: bool = False) -> bool:
+    """Demuxes raw image data, optionally applies sub-perceptual LSB dithering, and rebuilds container."""
+    if filepath.suffix.lower() not in VALID_EXTENSIONS:
+        return False
+
     try:
         try:
             from PIL import Image
             with Image.open(filepath) as img:
                 clean = Image.new(img.mode, img.size)
-                clean.putdata(list(img.getdata()))
-                clean.save(filepath)
+                pixels = list(img.getdata())
+
+                if pixel_dither and pixels:
+                    # Apply +-1 LSB jitter to ~2% of pixels to defeat perceptual hashing & LSB watermarks
+                    total_px = len(pixels)
+                    step = max(1, total_px // max(1, int(total_px * 0.02)))
+                    if isinstance(pixels[0], tuple):
+                        for idx in range(0, total_px, step):
+                            px = list(pixels[idx])
+                            ch_idx = idx % min(3, len(px))
+                            delta = 1 if (idx % 2 == 0) else -1
+                            px[ch_idx] = max(0, min(255, px[ch_idx] + delta))
+                            pixels[idx] = tuple(px)
+                    elif isinstance(pixels[0], int):
+                        for idx in range(0, total_px, step):
+                            delta = 1 if (idx % 2 == 0) else -1
+                            pixels[idx] = max(0, min(255, pixels[idx] + delta))
+
+                clean.putdata(pixels)
+                save_kwargs = {}
+                if filepath.suffix.lower() in (".jpg", ".jpeg"):
+                    save_kwargs["quality"] = 95
+                    save_kwargs["optimize"] = True
+                clean.save(filepath, **save_kwargs)
                 return True
         except ImportError:
             pass
 
+        # Pure-Python fallback for PNG containers
         data = filepath.read_bytes()
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             return False
@@ -277,8 +374,21 @@ def reencode_scorched_earth(filepath: Path) -> bool:
         if not ihdr_data or not idat_chunks:
             return False
 
-        raw_idat = zlib.decompress(b"".join(idat_chunks))
-        recompressed = zlib.compress(raw_idat, level=6)
+        raw_idat = bytearray(zlib.decompress(b"".join(idat_chunks)))
+        if pixel_dither and len(raw_idat) > 32:
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", ihdr_data)
+            if bit_depth == 8 and interlace == 0:
+                bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type, 0)
+                if bpp > 0:
+                    stride = 1 + width * bpp
+                    if len(raw_idat) == height * stride:
+                        for row in range(0, height, max(1, height // 10)):
+                            row_start = row * stride
+                            if raw_idat[row_start] == 0 and stride > 2:
+                                col_offset = row_start + 1 + ((row * 7) % (width * bpp))
+                                raw_idat[col_offset] = raw_idat[col_offset] ^ 1
+
+        recompressed = zlib.compress(bytes(raw_idat), level=6)
 
         def make_chunk(tag: bytes, payload: bytes) -> bytes:
             crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
@@ -305,6 +415,9 @@ DEFAULT_FOLDER_PROFILE = {
     "strip_exif": True,
     "strip_icc": True,
     "scorched_earth": False,
+    "pixel_dither": False,
+    "recursive": False,
+    "include_media_docs": False,
     "clamp_time": True,
     "clamp_mode": "static_2020",
     "clamp_custom_date": "2020-01-01 00:00:00",
@@ -323,33 +436,37 @@ DEFAULT_FOLDER_PROFILE = {
 SYSTEM_PRESETS = {
     "ghost": {
         "label": "🛡️ Ghost (Full Scrub + Clamped 2020 + UUID Hash)",
-        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "clamp_time": True,
-        "clamp_mode": "static_2020", "random_hash": True, "naming_mode": "hash", "prefix": "img_", "suffix": ""
+        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "pixel_dither": False,
+        "clamp_time": True, "clamp_mode": "static_2020", "random_hash": True, "naming_mode": "hash",
+        "prefix": "img_", "suffix": ""
     },
     "balanced": {
         "label": "⚖️ Balanced (Full Scrub + Word Slug - Shows in Today's Gallery)",
-        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "clamp_time": False,
-        "clamp_mode": "day_fuzz", "random_hash": True, "naming_mode": "slug", "prefix": "", "suffix": ""
+        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "pixel_dither": False,
+        "clamp_time": False, "clamp_mode": "day_fuzz", "random_hash": True, "naming_mode": "slug",
+        "prefix": "", "suffix": ""
     },
     "scorched": {
-        "label": "🔥 Scorched Earth (Pixel Re-encoding + Scrub + Clamped 2020)",
-        "strip_exif": True, "strip_icc": True, "scorched_earth": True, "clamp_time": True,
-        "clamp_mode": "static_2020", "random_hash": True, "naming_mode": "hash", "prefix": "clean_", "suffix": ""
+        "label": "🔥 Scorched Earth (Pixel Re-encoding + Dither + Scrub + Clamped 2020)",
+        "strip_exif": True, "strip_icc": True, "scorched_earth": True, "pixel_dither": True,
+        "clamp_time": True, "clamp_mode": "static_2020", "random_hash": True, "naming_mode": "hash",
+        "prefix": "clean_", "suffix": ""
     },
     "sequential": {
         "label": "🔢 Sequential (Full Scrub + Clean Numbering: IMG_0001)",
-        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "clamp_time": False,
-        "clamp_mode": "day_fuzz", "random_hash": True, "naming_mode": "seq", "prefix": "IMG_", "seq_padding": 4, "suffix": ""
+        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "pixel_dither": False,
+        "clamp_time": False, "clamp_mode": "day_fuzz", "random_hash": True, "naming_mode": "seq",
+        "prefix": "IMG_", "seq_padding": 4, "suffix": ""
     },
     "metadata_only": {
         "label": "🏷️ Metadata Strip Only (Keep Original Name & Current Time)",
-        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "clamp_time": False,
-        "random_hash": False, "naming_mode": "disabled"
+        "strip_exif": True, "strip_icc": True, "scorched_earth": False, "pixel_dither": False,
+        "clamp_time": False, "random_hash": False, "naming_mode": "disabled"
     },
     "timestomp_only": {
         "label": "⏱️ Timestomp Only (Clamp Date to 2020, Keep Filename & EXIF)",
-        "strip_exif": False, "strip_icc": False, "scorched_earth": False, "clamp_time": True,
-        "clamp_mode": "static_2020", "random_hash": False, "naming_mode": "disabled"
+        "strip_exif": False, "strip_icc": False, "scorched_earth": False, "pixel_dither": False,
+        "clamp_time": True, "clamp_mode": "static_2020", "random_hash": False, "naming_mode": "disabled"
     }
 }
 
@@ -374,6 +491,8 @@ DEFAULT_CONFIG = {
     "user_presets": {},
     "enable_backup": False,
     "encrypt_vault": True,
+    "vault_max_mb": 250,
+    "vault_max_days": 7,
     "active_sweeper": True,
     "sweep_interval_mins": 10,
     "enable_notifications": False,
@@ -418,16 +537,26 @@ CONFIG = load_config()
 
 
 def get_rules_for_file(filepath: Path, cfg: dict) -> dict:
+    """Matches file to its most specific registered folder rule."""
     file_parent = filepath.parent.resolve()
+    best_match = None
+    best_len = -1
+
     for entry in cfg.get("folders_v2", []):
         try:
             entry_path = Path(entry["path"]).resolve()
-            if file_parent == entry_path or filepath.resolve().is_relative_to(entry_path):
-                return entry
+            if file_parent == entry_path or (entry.get("recursive", False) and filepath.resolve().is_relative_to(entry_path)):
+                path_len = len(str(entry_path))
+                if path_len > best_len:
+                    best_match = entry
+                    best_len = path_len
         except Exception:
-            if str(filepath).startswith(str(entry.get("path", ""))):
-                return entry
-    return DEFAULT_FOLDER_PROFILE
+            p_str = str(entry.get("path", ""))
+            if str(filepath).startswith(p_str) and len(p_str) > best_len:
+                best_match = entry
+                best_len = len(p_str)
+
+    return best_match if best_match is not None else DEFAULT_FOLDER_PROFILE
 
 
 def log_event(category: str, msg: str):
@@ -448,8 +577,33 @@ def log_event(category: str, msg: str):
 
 
 # ==============================================================================
-# KEYBOARD INPUT ENGINE
+# KEYBOARD INPUT ENGINE (TTY RE-ATTACHMENT & FLICKER-FREE RENDERING)
 # ==============================================================================
+
+def clear_screen():
+    """Flicker-free terminal clear using direct ANSI escape sequences."""
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+
+
+def ensure_tty_stdin() -> bool:
+    """Re-attaches stdin (fd 0) to /dev/tty if launched via a pipe (e.g. curl | bash)."""
+    if platform.system() == "Windows":
+        return sys.stdin.isatty()
+    if sys.stdin.isatty():
+        return True
+    try:
+        tty_fd = os.open("/dev/tty", os.O_RDONLY)
+        os.dup2(tty_fd, 0)
+        os.close(tty_fd)
+        sys.stdin = open(0, "r", encoding="utf-8", errors="replace", closefd=False)
+        return os.isatty(0)
+    except Exception:
+        return False
+
 
 def read_single_key():
     if platform.system() == "Windows":
@@ -457,6 +611,7 @@ def read_single_key():
         try:
             ch = msvcrt.getch()
         except Exception:
+            time.sleep(0.1)
             return ""
 
         if ch in (b'\x00', b'\xe0'):
@@ -482,18 +637,33 @@ def read_single_key():
         return ch.decode('latin1', errors='ignore')
     else:
         import termios, tty
-        if not sys.stdin.isatty():
-            time.sleep(0.1)
-            return ""
+        if not ensure_tty_stdin():
+            time.sleep(0.5)
+            return "NO_TTY"
 
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
+        fd = 0
+        try:
+            old = termios.tcgetattr(fd)
+        except Exception:
+            time.sleep(0.5)
+            return "NO_TTY"
+
         try:
             tty.setraw(fd)
+            raw_attr = termios.tcgetattr(fd)
+            raw_attr[6][termios.VMIN] = 1
+            raw_attr[6][termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW, raw_attr)
+
             raw = os.read(fd, 32)
             if not raw:
-                time.sleep(0.05)
+                time.sleep(0.1)
                 return ""
+
+            if raw == b'\x1b':
+                r, _, _ = select.select([fd], [], [], 0.12)
+                if r:
+                    raw += os.read(fd, 32)
 
             if raw in (b'\x1b[A', b'\x1bOA', b'\x1b[a'):
                 return "UP"
@@ -528,38 +698,50 @@ def read_single_key():
             except Exception:
                 return ""
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
 
 
 def run_arrow_menu(header_fn, items, title="COMMAND CENTER", default_idx=0, is_main=False):
     cursor = default_idx
     total = len(items)
     w = get_ui_width()
+    needs_redraw = True
 
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        if header_fn:
-            header_fn()
+        if needs_redraw:
+            clear_screen()
+            if header_fn:
+                header_fn()
 
-        print(f"{CLR_BORDER}╭─ {BOLD}{title}{NC} {CLR_BORDER}{'─' * max(0, w - 5 - len(title))}╮{NC}")
-        for idx, (hotkey, label, _) in enumerate(items):
-            disp_label = truncate_middle(label, w - 12)
-            if idx == cursor:
-                print(f"{CLR_BORDER}│{NC}  {CLR_GREEN}{BOLD}▶ [{hotkey}] {disp_label}{NC}")
+            print(f"{CLR_BORDER}╭─ {BOLD}{title}{NC} {CLR_BORDER}{'─' * max(0, w - 5 - len(title))}╮{NC}")
+            for idx, (hotkey, label, _) in enumerate(items):
+                disp_label = truncate_middle(label, w - 12)
+                if idx == cursor:
+                    print(f"{CLR_BORDER}│{NC}  {CLR_GREEN}{BOLD}▶ [{hotkey}] {disp_label}{NC}")
+                else:
+                    print(f"{CLR_BORDER}│{NC}    {CLR_GRAY}[{hotkey}] {disp_label}{NC}")
+            print(f"{CLR_BORDER}╰{'─' * (w - 2)}╯{NC}")
+
+            if is_main:
+                print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Open: [Enter/Space] · Exit: [0]{NC}")
             else:
-                print(f"{CLR_BORDER}│{NC}    {CLR_GRAY}[{hotkey}] {disp_label}{NC}")
-        print(f"{CLR_BORDER}╰{'─' * (w - 2)}╯{NC}")
+                print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Select: [Enter/Space] · Back: [Q or Left]{NC}")
 
-        if is_main:
-            print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Open: [Enter/Space] · Exit: [0]{NC}")
-        else:
-            print(f"  {CLR_BLUE}Move: [↑/↓ or W/S] · Select: [Enter/Space] · Back: [Q or Left]{NC}")
-
+        needs_redraw = False
         key = read_single_key()
-        if key == "UP":
+        if key == "NO_TTY":
+            return "exit"
+        elif key == "" or key is None:
+            continue
+        elif key == "UP":
             cursor = (cursor - 1) % total
+            needs_redraw = True
         elif key == "DOWN":
             cursor = (cursor + 1) % total
+            needs_redraw = True
         elif key in ("ENTER", "RIGHT"):
             return items[cursor][2]
         elif key in ("QUIT", "ESC", "LEFT"):
@@ -592,6 +774,7 @@ def interactive_folder_browser(start_dir: Path = None) -> Path:
     cursor = 0
     offset = 0
     page_size = 8
+    needs_redraw = True
 
     while True:
         items = [("✔ [CHOOSE THIS FOLDER]", "SELECT")]
@@ -615,32 +798,40 @@ def interactive_folder_browser(start_dir: Path = None) -> Path:
         elif cursor >= offset + page_size:
             offset = cursor - page_size + 1
 
-        os.system("cls" if os.name == "nt" else "clear")
-        w = get_ui_width()
-        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
-        print(f"{CLR_CYAN}│{NC}  {BOLD}📁  INTERACTIVE FOLDER NAVIGATOR{NC}")
-        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
-        print(f"  {CLR_GRAY}Location:{NC} {CLR_AMBER}{BOLD}{truncate_middle(str(cur_dir), w - 12)}{NC}")
-        print(f"  {CLR_BLUE}Controls: [↑/↓ or W/S] Move · [Enter/Space] Select · [Q] Cancel{NC}")
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
+        if needs_redraw:
+            clear_screen()
+            w = get_ui_width()
+            print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  {BOLD}📁  INTERACTIVE FOLDER NAVIGATOR{NC}")
+            print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}")
+            print(f"  {CLR_GRAY}Location:{NC} {CLR_AMBER}{BOLD}{truncate_middle(str(cur_dir), w - 12)}{NC}")
+            print(f"  {CLR_BLUE}Controls: [↑/↓ or W/S] Move · [Enter/Space] Select · [Q] Cancel{NC}")
+            print(f"{CLR_BORDER}{'─' * w}{NC}")
 
-        end_idx = min(offset + page_size, total)
-        for i in range(offset, end_idx):
-            item_text, _ = items[i]
-            disp = truncate_middle(item_text, w - 8)
-            if i == cursor:
-                print(f"  {CLR_GREEN}{BOLD}▶ {disp}{NC}")
-            else:
-                print(f"    {CLR_GRAY}{disp}{NC}")
+            end_idx = min(offset + page_size, total)
+            for i in range(offset, end_idx):
+                item_text, _ = items[i]
+                disp = truncate_middle(item_text, w - 8)
+                if i == cursor:
+                    print(f"  {CLR_GREEN}{BOLD}▶ {disp}{NC}")
+                else:
+                    print(f"    {CLR_GRAY}{disp}{NC}")
 
-        print(f"{CLR_BORDER}{'─' * w}{NC}")
-        print(f"  {DIM}Showing {cursor + 1}/{total}  (Press 'T' to type path manually){NC}")
+            print(f"{CLR_BORDER}{'─' * w}{NC}")
+            print(f"  {DIM}Showing {cursor + 1}/{total}  (Press 'T' to type path manually){NC}")
 
+        needs_redraw = False
         key = read_single_key()
-        if key == "UP":
+        if key in ("NO_TTY", "QUIT", "ESC", "LEFT"):
+            return None
+        elif key == "" or key is None:
+            continue
+        elif key == "UP":
             cursor = (cursor - 1) % total
+            needs_redraw = True
         elif key == "DOWN":
             cursor = (cursor + 1) % total
+            needs_redraw = True
         elif key in ("ENTER", "RIGHT"):
             _, action_obj = items[cursor]
             if action_obj == "SELECT":
@@ -649,19 +840,20 @@ def interactive_folder_browser(start_dir: Path = None) -> Path:
                 cur_dir = cur_dir.parent
                 cursor = 0
                 offset = 0
+                needs_redraw = True
             elif action_obj != "DENIED" and isinstance(action_obj, Path):
                 cur_dir = action_obj
                 cursor = 0
                 offset = 0
+                needs_redraw = True
         elif key in ("t", "T"):
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  {CLR_CYAN}Manual Path Input:{NC}")
             custom = input("  Path > ").strip().strip("'\"")
             cp = Path(custom)
             if cp.exists() and cp.is_dir():
                 return cp
-        elif key in ("QUIT", "ESC", "LEFT"):
-            return None
+            needs_redraw = True
 
 
 # ==============================================================================
@@ -715,7 +907,6 @@ class ExifToolDaemon:
             if not self.proc or self.proc.poll() is not None:
                 self._start()
 
-            # Auto-recycle daemon every 250 operations to guarantee strict resident memory caps
             self.cmd_count += 1
             if self.cmd_count >= 250:
                 log_event("ENGINE", "ExifTool operation cap reached (250). Auto-recycling engine memory...")
@@ -784,7 +975,7 @@ class ExifToolDaemon:
 EXIFTOOL_ENGINE = ExifToolDaemon()
 
 # ==============================================================================
-# VAULT ENCRYPTION & CANARY GENERATOR
+# VAULT ENCRYPTION, EXTENSION PRESERVATION & AUTO-PRUNING QUOTA
 # ==============================================================================
 
 def get_vault_secret() -> str:
@@ -834,6 +1025,42 @@ def decrypt_payload(data: bytes, key: str) -> bytes:
             out[i + j] = ciphertext[i + j] ^ keystream[j]
         block_idx += 1
     return bytes(out)
+
+
+def prune_vault_storage(cfg: dict):
+    """Automatically prunes expired backups or enforces MB quota on ~/.shotclean/vault."""
+    try:
+        max_days = int(cfg.get("vault_max_days", 7))
+        max_mb = int(cfg.get("vault_max_mb", 250))
+        now = time.time()
+        files = [f for f in VAULT_DIR.glob("*") if f.is_file()]
+
+        # 1. Prune by age
+        if max_days > 0:
+            cutoff = now - (max_days * 86400)
+            for vf in list(files):
+                try:
+                    if vf.stat().st_mtime < cutoff:
+                        vf.unlink()
+                        files.remove(vf)
+                except OSError:
+                    pass
+
+        # 2. Prune oldest files if total size exceeds max_mb
+        if max_mb > 0 and files:
+            max_bytes = max_mb * 1024 * 1024
+            files.sort(key=lambda f: f.stat().st_mtime)
+            total_bytes = sum(f.stat().st_size for f in files)
+            while total_bytes > max_bytes and files:
+                oldest = files.pop(0)
+                try:
+                    sz = oldest.stat().st_size
+                    oldest.unlink()
+                    total_bytes -= sz
+                except OSError:
+                    pass
+    except Exception:
+        pass
 
 
 def create_synthetic_png(target_path: Path):
@@ -895,7 +1122,7 @@ def get_next_sequence_number(folder: Path, rules: dict, preview=False) -> int:
             candidate_base = candidate_base.lower()
 
         matched = False
-        for ext in VALID_EXTENSIONS:
+        for ext in ALL_SUPPORTED_EXTENSIONS:
             if (folder / f"{candidate_base}{ext}").exists() or (folder / f"{candidate_base.upper()}{ext.upper()}").exists():
                 counter += 1
                 matched = True
@@ -1116,7 +1343,7 @@ def file_settling_probe(filepath: Path, timeout: float = 5.0) -> bool:
 
 
 def sanitize_single_file(filepath: Path) -> Path:
-    """Core pipeline: scrubs, re-encodes, renames, and clamps a single file."""
+    """Core pipeline: scrubs, re-encodes, renames, clamps, and records in persistent ledger."""
     cfg = load_config()
     rules = get_rules_for_file(filepath, cfg)
 
@@ -1125,9 +1352,10 @@ def sanitize_single_file(filepath: Path) -> Path:
 
     if not filepath.exists() or filepath.name.startswith("."):
         return filepath
-    if filepath.name in GENERATED_NAMES_HISTORY:
+    if filepath.name in GENERATED_NAMES_HISTORY or is_file_in_ledger(filepath):
         return filepath
     if prefix and filepath.name.startswith(prefix) and mode in ("hash", "seq"):
+        record_file_in_ledger(filepath)
         return filepath
 
     log_event("PROBE", f"Interception: {filepath.name} [{rules.get('profile', 'custom').upper()}]")
@@ -1143,24 +1371,27 @@ def sanitize_single_file(filepath: Path) -> Path:
         return filepath
     PROCESSED_COOLDOWN[file_key] = now
 
-    # 1. Encrypted Safety Vault Backup
+    # 1. Encrypted Safety Vault Backup (Preserves Original Extension)
     if cfg.get("enable_backup", False):
         try:
             raw_bytes = filepath.read_bytes()
             t_token = int(time.time())
+            ext_sfx = filepath.suffix.lower() or ".png"
             if cfg.get("encrypt_vault", True):
                 sec = get_vault_secret()
                 enc = encrypt_payload(raw_bytes, sec)
-                (VAULT_DIR / f"{filepath.stem}_{t_token}.enc").write_bytes(enc)
+                (VAULT_DIR / f"{filepath.stem}_{t_token}{ext_sfx}.enc").write_bytes(enc)
             else:
-                (VAULT_DIR / f"{filepath.stem}_{t_token}{filepath.suffix}").write_bytes(raw_bytes)
+                (VAULT_DIR / f"{filepath.stem}_{t_token}{ext_sfx}").write_bytes(raw_bytes)
+            prune_vault_storage(cfg)
         except Exception as ex:
             log_event("ERROR", f"Vault backup failed: {ex}")
 
-    # 2. Scorched Earth Deep Re-encoding (if enabled)
+    # 2. Scorched Earth Deep Re-encoding & Optional LSB Dithering
     if rules.get("scorched_earth", False):
-        if reencode_scorched_earth(filepath):
-            log_event("SCORCH", f"Pixel-level canvas re-encoded: {filepath.name}")
+        dither = bool(rules.get("pixel_dither", False))
+        if reencode_scorched_earth(filepath, pixel_dither=dither):
+            log_event("SCORCH", f"Pixel-level canvas re-encoded (dither={dither}): {filepath.name}")
 
     # 3. ExifTool Scrubbing
     if rules.get("strip_exif", True):
@@ -1210,10 +1441,12 @@ def sanitize_single_file(filepath: Path) -> Path:
         except OSError:
             pass
 
+    # Record final file state in persistent ledger so restarts never re-rename it
+    record_file_in_ledger(target_path)
+
     # 6. Android MediaStore Pruning & Invalidation
     if "com.termux" in os.environ.get("PREFIX", ""):
         if old_original_path != target_path:
-            # Modern Android 11+ Direct Content Provider Delete
             subprocess.run(
                 ["content", "delete", "--uri", "content://media/external/images/media", "--where", f"_data='{old_original_path}'"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -1269,6 +1502,23 @@ def check_file_has_metadata(filepath: Path) -> bool:
         return False
 
 
+def iter_monitored_files(folder_path: Path, folder_cfg: dict):
+    """Yields matching files in folder_path respecting recursive and media/doc settings."""
+    exts = get_valid_extensions_for_rules(folder_cfg)
+    recursive = bool(folder_cfg.get("recursive", False))
+    iterator = folder_path.rglob("*") if recursive else folder_path.glob("*")
+    for item in iterator:
+        try:
+            if not item.is_file() or item.name.startswith("."):
+                continue
+            if ".shotclean" in item.parts:
+                continue
+            if item.suffix.lower() in exts:
+                yield item
+        except OSError:
+            continue
+
+
 def run_active_directory_sweep():
     """Scans all monitored folders for unscrubbed files taken while offline."""
     cfg = load_config()
@@ -1286,21 +1536,34 @@ def run_active_directory_sweep():
         prefix = folder_cfg.get("prefix", "")
         mode = folder_cfg.get("naming_mode", "hash")
 
-        for ext in VALID_EXTENSIONS:
-            for img in p.glob(f"*{ext}"):
-                if img.name.startswith(".") or img.name in GENERATED_NAMES_HISTORY:
-                    continue
-                is_cleaned_name = prefix and img.name.startswith(prefix) and mode in ("hash", "seq")
-                if is_cleaned_name:
-                    if not check_file_has_metadata(img):
-                        continue
+        for img in iter_monitored_files(p, folder_cfg):
+            if img.name in GENERATED_NAMES_HISTORY or is_file_in_ledger(img):
+                continue
 
-                WORK_QUEUE.put(img)
-                total_found += 1
-                time.sleep(0.08)
+            is_cleaned_name = prefix and img.name.startswith(prefix) and mode in ("hash", "seq")
+            if is_cleaned_name:
+                if not check_file_has_metadata(img):
+                    record_file_in_ledger(img)
+                    continue
+
+            # If naming_mode is disabled (Metadata Only / Timestomp Only), only queue if metadata or timestamp is uncleaned
+            if mode == "disabled" or not folder_cfg.get("random_hash", True):
+                needs_exif = folder_cfg.get("strip_exif", True) and check_file_has_metadata(img)
+                needs_clamp = False
+                if folder_cfg.get("clamp_time", True):
+                    target_ep = compute_clamp_epoch(folder_cfg)
+                    if abs(img.stat().st_mtime - target_ep) > 60:
+                        needs_clamp = True
+                if not needs_exif and not needs_clamp:
+                    record_file_in_ledger(img)
+                    continue
+
+            WORK_QUEUE.put(img)
+            total_found += 1
+            time.sleep(0.05)
 
     if total_found > 0:
-        log_event("SWEEPER", f"Active Sweep queued {total_found} unscrubbed image(s) for sanitization.")
+        log_event("SWEEPER", f"Active Sweep queued {total_found} unscrubbed file(s) for sanitization.")
     else:
         log_event("SWEEPER", "Active Sweep completed: 100% clean.")
 
@@ -1324,17 +1587,20 @@ threading.Thread(target=sweeper_daemon_thread, daemon=True).start()
 
 
 class AsyncWatchHandler(FileSystemEventHandler):
+    def _handle_path(self, raw_path: str):
+        p = Path(raw_path)
+        cfg = load_config()
+        rules = get_rules_for_file(p, cfg)
+        if p.suffix.lower() in get_valid_extensions_for_rules(rules):
+            WORK_QUEUE.put(p)
+
     def on_created(self, event):
         if not event.is_directory:
-            p = Path(event.src_path)
-            if p.suffix.lower() in VALID_EXTENSIONS:
-                WORK_QUEUE.put(p)
+            self._handle_path(event.src_path)
 
     def on_moved(self, event):
         if not event.is_directory:
-            p = Path(event.dest_path)
-            if p.suffix.lower() in VALID_EXTENSIONS:
-                WORK_QUEUE.put(p)
+            self._handle_path(event.dest_path)
 
 
 class DaemonManager:
@@ -1346,8 +1612,8 @@ class DaemonManager:
         if cls.is_running:
             return
         cfg = load_config()
-        valid_folders = [Path(f["path"]) for f in cfg.get("folders_v2", []) if Path(f["path"]).exists()]
-        if not valid_folders:
+        valid_entries = [f for f in cfg.get("folders_v2", []) if Path(f["path"]).exists()]
+        if not valid_entries:
             log_event("WARN", "No registered folders exist on disk to monitor.")
             return
 
@@ -1356,12 +1622,16 @@ class DaemonManager:
             return
         cls.observer = Observer()
         handler = AsyncWatchHandler()
-        for folder in valid_folders:
-            cls.observer.schedule(handler, path=str(folder), recursive=False)
+        for f_entry in valid_entries:
+            cls.observer.schedule(
+                handler,
+                path=str(f_entry["path"]),
+                recursive=bool(f_entry.get("recursive", False)),
+            )
 
         cls.observer.start()
         cls.is_running = True
-        log_event("DAEMON", f"Background watcher online. Tracking {len(valid_folders)} folder(s).")
+        log_event("DAEMON", f"Background watcher online. Tracking {len(valid_entries)} folder(s).")
         threading.Thread(target=run_active_directory_sweep, daemon=True).start()
 
     @classmethod
@@ -1402,13 +1672,13 @@ def draw_main_header():
         print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
 
     pipe_status = f"{CLR_GREEN}Active (-stay_open){NC}"
-    vault_status = f"{CLR_GREEN}ON (AES Encrypted){NC}" if cfg.get("enable_backup") else f"{CLR_GRAY}OFF{NC}"
+    vault_status = f"{CLR_GREEN}ON (AES · {cfg.get('vault_max_mb', 250)}MB Cap){NC}" if cfg.get("enable_backup") else f"{CLR_GRAY}OFF{NC}"
     sweep_status = f"{CLR_GREEN}ON (Every {cfg.get('sweep_interval_mins', 10)}m){NC}" if cfg.get("active_sweeper", True) else f"{CLR_GRAY}OFF{NC}"
 
     print(f"{CLR_BLUE}╭─ {BOLD}SYSTEM & ENGINE HEALTH{NC} {CLR_BLUE}{'─' * max(0, w - 26)}╮{NC}")
     print(f"{CLR_BLUE}│{NC} Engine State : {status_text}   {CLR_GRAY}(Session scrubbed: {SESSION_CLEANED_COUNT}){NC}")
     print(f"{CLR_BLUE}│{NC} Auto-Sweeper : {sweep_status}  ·  ExifTool: {pipe_status}")
-    print(f"{CLR_BLUE}│{NC} Backup Vault : {vault_status}  {CLR_GRAY}(~/.shotclean/vault){NC}")
+    print(f"{CLR_BLUE}│{NC} Backup Vault : {vault_status}")
     print(f"{CLR_BLUE}╰{'─' * (w - 2)}╯{NC}")
 
     print(f"{CLR_AMBER}╭─ {BOLD}MONITORED FOLDERS ({len(folders)}){NC} {CLR_AMBER}{'─' * max(0, w - 26)}╮{NC}")
@@ -1417,8 +1687,9 @@ def draw_main_header():
     else:
         for f in folders[:3]:
             p_label = f.get("profile", "custom").upper()
-            path_disp = truncate_middle(f.get("path", ""), w - 24)
-            print(f"{CLR_AMBER}│{NC}  📁 {BOLD}{path_disp}{NC} [{CLR_GREEN}{p_label}{NC}]")
+            rec_tag = " [R]" if f.get("recursive") else ""
+            path_disp = truncate_middle(f.get("path", ""), w - 28)
+            print(f"{CLR_AMBER}│{NC}  📁 {BOLD}{path_disp}{NC} [{CLR_GREEN}{p_label}{rec_tag}{NC}]")
         if len(folders) > 3:
             print(f"{CLR_AMBER}│{NC}  {CLR_GRAY}...and {len(folders) - 3} more folder(s){NC}")
     print(f"{CLR_AMBER}╰{'─' * (w - 2)}╯{NC}")
@@ -1434,19 +1705,21 @@ def tool_manage_sweeper():
         w = get_ui_width()
         enabled = cfg.get("active_sweeper", True)
         interval = cfg.get("sweep_interval_mins", 10)
+        ledger_count = len(_load_ledger_unlocked())
 
         def header_card():
             print(f"{CLR_CYAN}╭─ {BOLD}💡 ACTIVE EXIF SWEEPER & CATCH-UP GUARD{NC} {CLR_CYAN}{'─' * max(0, w - 43)}╮{NC}")
             print(f"{CLR_CYAN}│{NC}  Automatically finds and scrubs photos taken while ShotClean was OFF.")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Catch-Up Sweep{NC}  : Scans on startup when you launch the app.")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Periodic Guard{NC}  : Checks every {interval} mins in background.")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Zero Redundancy{NC} : Only sanitizes files with active EXIF/XMP.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Catch-Up Sweep{NC}   : Scans on startup when you launch the app.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Periodic Guard{NC}   : Checks every {interval} mins in background.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Scrubbed Ledger{NC}  : {ledger_count} verified clean files tracked across restarts.")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
         menu_items = [
             ("1", f"⚡ Toggle Active Sweeper [{'🟢 ON' if enabled else '⚪ OFF'}]", "toggle"),
             ("2", "🧹 Trigger Immediate Catch-Up Sweep Now", "run_now"),
             ("3", f"⏱️  Set Periodic Sweep Frequency [{interval} mins]", "interval"),
+            ("4", f"🗑️  Reset Scrubbed File Ledger ({ledger_count} entries)", "clear_ledger"),
             ("0", "🔙 Back to Main Menu", "back"),
         ]
 
@@ -1457,7 +1730,7 @@ def tool_manage_sweeper():
             save_config(cfg)
 
         elif action == "run_now":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  {CLR_CYAN}Running active folder sweep across all monitored paths...{NC}\n")
             run_active_directory_sweep()
             print(f"\n  {CLR_GREEN}{BOLD}✔ Sweep complete! Any unscrubbed files were queued.{NC}\n")
@@ -1474,9 +1747,15 @@ def tool_manage_sweeper():
                 ("0", "🔙 Cancel", "back"),
             ]
             chosen_i = run_arrow_menu(int_header, i_items, title="SWEEP INTERVAL")
-            if chosen_i and chosen_i != "back":
+            if chosen_i is not None and chosen_i != "back":
                 cfg["sweep_interval_mins"] = chosen_i
                 save_config(cfg)
+
+        elif action == "clear_ledger":
+            with LEDGER_LOCK:
+                _save_ledger_unlocked({})
+            print(f"\n  {CLR_GREEN}✔ Scrubbed ledger cleared.{NC}")
+            time.sleep(0.8)
 
         elif action in ("back", None):
             break
@@ -1515,7 +1794,7 @@ def tool_manage_presets():
         action = run_arrow_menu(header_card, menu_items, title="PRESET STUDIO")
 
         if action == "save_current":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             if not folders:
                 print(f"  {CLR_RED}No folders registered to extract settings from.{NC}"); time.sleep(1); continue
 
@@ -1531,6 +1810,9 @@ def tool_manage_presets():
                 "strip_exif": src.get("strip_exif", True),
                 "strip_icc": src.get("strip_icc", True),
                 "scorched_earth": src.get("scorched_earth", False),
+                "pixel_dither": src.get("pixel_dither", False),
+                "recursive": src.get("recursive", False),
+                "include_media_docs": src.get("include_media_docs", False),
                 "clamp_time": src.get("clamp_time", True),
                 "clamp_mode": src.get("clamp_mode", "static_2020"),
                 "clamp_custom_date": src.get("clamp_custom_date", "2020-01-01 00:00:00"),
@@ -1602,17 +1884,17 @@ def tool_manage_folders():
             print(f"{CLR_CYAN}│{NC}  Assign independent security policies per directory:")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}GHOST{NC}      : Wipes EXIF/ICC + 2020 clamp + random hash.")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}BALANCED{NC}   : Wipes EXIF/ICC + readable slug (shows Today).")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}SCORCHED{NC}   : Pure pixel canvas re-encoding + full metadata strip.")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}SCORCHED{NC}   : Pixel re-encoding + LSB dither + full strip.")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}SEQUENTIAL{NC} : Scrub + structured sequential counters.")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}METADATA{NC}   : Wipes EXIF/ICC only (keeps filename intact).")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}TIMESTOMP{NC}  : Clamps time only (keeps EXIF & filename).")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
             print(f"  {BOLD}Registered Directories ({len(folders)}):{NC}")
             for idx, f in enumerate(folders, 1):
                 p = Path(f["path"])
                 status = f"{CLR_GREEN}Active{NC}" if p.exists() else f"{CLR_RED}Missing Path{NC}"
-                disp = truncate_middle(f["path"], w - 24)
-                print(f"  [{idx}] {BOLD}{disp}{NC} [{CLR_AMBER}{f.get('profile', 'custom').upper()}{NC}] ({status})")
+                rec_badge = " · Recursive" if f.get("recursive") else ""
+                disp = truncate_middle(f["path"], w - 28)
+                print(f"  [{idx}] {BOLD}{disp}{NC} [{CLR_AMBER}{f.get('profile', 'custom').upper()}{rec_badge}{NC}] ({status})")
             print()
 
         menu_items = [
@@ -1642,7 +1924,7 @@ def tool_manage_folders():
                     time.sleep(1)
 
         elif action == "add_manual":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             manual = input("\n  Enter full folder path: ").strip().strip("'\"")
             mp = Path(manual)
             if mp.exists() and mp.is_dir():
@@ -1688,10 +1970,9 @@ def configure_individual_folder(index: int):
             print(f"{CLR_CYAN}╭─ {BOLD}💡 POLICY BREAKDOWN FOR THIS FOLDER{NC} {CLR_CYAN}{'─' * max(0, w - 38)}╮{NC}")
             print(f"{CLR_CYAN}│{NC}  Target: {CLR_WHITE}{truncate_middle(f['path'], w - 14)}{NC}")
             print(f"{CLR_CYAN}│{NC}  • {BOLD}Active Policy{NC} : {CLR_AMBER}{f.get('profile', 'custom').upper()}{NC}")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF Strip{NC}    : {'ON' if f.get('strip_exif') else 'OFF'}  ·  {BOLD}ICC Strip{NC}: {'ON' if f.get('strip_icc') else 'OFF'}")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Scorched Earth{NC}: {'ON (Pixel Re-encoded)' if f.get('scorched_earth') else 'OFF'}")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Time Clamp{NC}    : {'ON (' + f.get('clamp_mode', 'static_2020') + ')' if f.get('clamp_time') else 'OFF'}")
-            print(f"{CLR_CYAN}│{NC}  • {BOLD}Naming Mode{NC}   : {f.get('naming_mode', 'hash')} (Prefix: '{f.get('prefix', 'img_')}')")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}EXIF/ICC Strip{NC}: {'ON' if f.get('strip_exif') else 'OFF'} / {'ON' if f.get('strip_icc') else 'OFF'}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Scorched/Dither{NC}: {'ON' if f.get('scorched_earth') else 'OFF'} / {'ON' if f.get('pixel_dither') else 'OFF'}")
+            print(f"{CLR_CYAN}│{NC}  • {BOLD}Scope{NC}         : {'Recursive Subfolders' if f.get('recursive') else 'Top-Level Only'} · {'+MP4/PDF' if f.get('include_media_docs') else 'Images Only'}")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
         pfx = f.get('prefix', 'img_')
@@ -1702,11 +1983,14 @@ def configure_individual_folder(index: int):
             ("2", f"🏷️  Toggle EXIF Metadata Scrubbing [{'ON' if f.get('strip_exif') else 'OFF'}]", "toggle_exif"),
             ("3", f"🎨 Toggle Display ICC Profile Removal [{'ON' if f.get('strip_icc') else 'OFF'}]", "toggle_icc"),
             ("4", f"🔥 Toggle Scorched Earth Pixel Re-encoding [{'ON' if f.get('scorched_earth') else 'OFF'}]", "toggle_scorch"),
-            ("5", f"⏱️  Timestamp Clamping Settings [{'ON' if f.get('clamp_time') else 'OFF'}]", "config_time"),
-            ("6", f"🎲 Naming Camouflage Style [{f.get('naming_mode', 'hash')}]", "naming_style"),
-            ("7", f"✏️  Configure Prefix ['{pfx}'] & Suffix ['{sfx or '(None)'}']", "prefix_suffix"),
-            ("8", f"🔢 Reset Sequential Counter [Current: {f.get('seq_counter', 1)}]", "reset_counter"),
-            ("9", "🗑️  Delete this folder from watchlist", "delete"),
+            ("5", f"🧬 Toggle Anti-pHash Sub-Perceptual Dithering [{'ON' if f.get('pixel_dither') else 'OFF'}]", "toggle_dither"),
+            ("6", f"📂 Toggle Recursive Subfolder Monitoring [{'ON' if f.get('recursive') else 'OFF'}]", "toggle_recursive"),
+            ("7", f"🎬 Toggle Video/PDF Sanitization (.mp4/.mov/.pdf) [{'ON' if f.get('include_media_docs') else 'OFF'}]", "toggle_media"),
+            ("8", f"⏱️  Timestamp Clamping Settings [{'ON' if f.get('clamp_time') else 'OFF'}]", "config_time"),
+            ("9", f"🎲 Naming Camouflage Style [{f.get('naming_mode', 'hash')}]", "naming_style"),
+            ("P", f"✏️  Configure Prefix ['{pfx}'] & Suffix ['{sfx or '(None)'}']", "prefix_suffix"),
+            ("R", f"🔢 Reset Sequential Counter [Current: {f.get('seq_counter', 1)}]", "reset_counter"),
+            ("D", "🗑️  Delete this folder from watchlist", "delete"),
             ("0", "🔙 Done / Save & Return", "back"),
         ]
 
@@ -1718,7 +2002,7 @@ def configure_individual_folder(index: int):
             p_items = [
                 ("1", "🛡️  Ghost (Full EXIF + ICC + Clamped 2020 + UUID Hash)", "ghost"),
                 ("2", "⚖️  Balanced (Full Scrub + Word Slug - Shows in Today's Gallery)", "balanced"),
-                ("3", "🔥 Scorched Earth (Pixel Re-encoding + Scrub + Clamped 2020)", "scorched"),
+                ("3", "🔥 Scorched Earth (Pixel Re-encoding + Dither + Clamped 2020)", "scorched"),
                 ("4", "🔢 Sequential (Full Scrub + Clean Numbering: IMG_0001)", "sequential"),
                 ("5", "🏷️  Metadata Strip Only (Scrub EXIF/ICC, keep filename & Today)", "metadata_only"),
                 ("6", "⏱️  Timestomp Only (Clamp time to 2020, leave bytes & filename alone)", "timestomp_only"),
@@ -1750,6 +2034,21 @@ def configure_individual_folder(index: int):
             f["profile"] = "custom"
             save_config(cfg); DaemonManager.restart()
 
+        elif action == "toggle_dither":
+            f["pixel_dither"] = not f.get("pixel_dither", False)
+            if f["pixel_dither"]:
+                f["scorched_earth"] = True
+            f["profile"] = "custom"
+            save_config(cfg); DaemonManager.restart()
+
+        elif action == "toggle_recursive":
+            f["recursive"] = not f.get("recursive", False)
+            save_config(cfg); DaemonManager.restart()
+
+        elif action == "toggle_media":
+            f["include_media_docs"] = not f.get("include_media_docs", False)
+            save_config(cfg); DaemonManager.restart()
+
         elif action == "config_time":
             def time_header():
                 print(f"{CLR_CYAN}=== Configure Timestamp Clamping for this Folder ==={NC}\n")
@@ -1769,7 +2068,7 @@ def configure_individual_folder(index: int):
                 f["clamp_mode"] = t_action
                 f["clamp_time"] = True
             elif t_action == "custom":
-                os.system("cls" if os.name == "nt" else "clear")
+                clear_screen()
                 inp = input("\n  Enter custom timestamp (YYYY-MM-DD HH:MM:SS): ").strip()
                 try:
                     time.strptime(inp, "%Y-%m-%d %H:%M:%S")
@@ -1802,7 +2101,7 @@ def configure_individual_folder(index: int):
                 save_config(cfg); DaemonManager.restart()
 
         elif action == "prefix_suffix":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Prefix: '{f.get('prefix', '')}'")
             np = input("  New Prefix (leave blank for none): ").strip()
             f["prefix"] = "".join(ch for ch in np if ch.isalnum() or ch in ("_", "-"))
@@ -1815,7 +2114,7 @@ def configure_individual_folder(index: int):
             print(f"  {CLR_GREEN}✔ Saved.{NC}"); time.sleep(0.8)
 
         elif action == "reset_counter":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Sequential Counter: {f.get('seq_counter', 1)}")
             new_cnt = input("  Enter new starting counter number (e.g. 1): ").strip()
             if new_cnt.isdigit() and int(new_cnt) >= 1:
@@ -1825,7 +2124,7 @@ def configure_individual_folder(index: int):
             time.sleep(1)
 
         elif action == "delete":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             confirm = input(f"\n  Remove '{f['path']}' from monitored list? [y/N]: ").strip().lower()
             if confirm in ["y", "yes"]:
                 folders.pop(index)
@@ -1905,7 +2204,7 @@ def tool_manage_naming():
                 save_config(cfg); DaemonManager.restart()
 
         elif action == "prefix":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Prefix: '{pfx}'")
             new_pfx = input("  Enter new prefix (e.g. 'IMG_', 'shot_', or blank): ").strip()
             sanitized = "".join(ch for ch in new_pfx if ch.isalnum() or ch in ("_", "-"))
@@ -1915,10 +2214,10 @@ def tool_manage_naming():
             time.sleep(0.8)
 
         elif action == "suffix":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Suffix: '{sfx}'")
             new_sfx = input("  Enter new suffix (e.g. 'clean', 'vault', or blank): ").strip()
-            sanitized = "".join(ch for ch in new_pfx if ch.isalnum() or ch in ("_", "-"))
+            sanitized = "".join(ch for ch in new_sfx if ch.isalnum() or ch in ("_", "-"))
             target_folder["suffix"] = sanitized
             save_config(cfg)
             print(f"  {CLR_GREEN}✔ Suffix updated to: '{sanitized}'{NC}")
@@ -1940,7 +2239,7 @@ def tool_manage_naming():
                 save_config(cfg); time.sleep(0.8)
 
         elif action == "reset_counter":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Sequential Counter: {target_folder.get('seq_counter', 1)}")
             new_cnt = input("  Enter new starting counter number (e.g. 1): ").strip()
             if new_cnt.isdigit() and int(new_cnt) >= 1:
@@ -1969,7 +2268,7 @@ def tool_manage_naming():
                 save_config(cfg); time.sleep(0.8)
 
         elif action == "preview":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  {CLR_AMBER}Rolling 3 test samples for '{mode.upper()}':{NC}\n")
             for _ in range(3):
                 print(f"   • {CLR_GREEN}{BOLD}{generate_sanitized_filename(dummy_path, target_folder, preview=True)}{NC}")
@@ -2058,7 +2357,7 @@ def tool_manage_clamping():
                 save_config(cfg); DaemonManager.restart()
 
         elif action == "set_custom":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"\n  Current Custom Date: '{custom_date}'")
             print("  Enter custom timestamp format: YYYY-MM-DD HH:MM:SS")
             inp = input("  Target Time > ").strip()
@@ -2097,28 +2396,31 @@ def tool_manage_clamping():
 
 
 # ==============================================================================
-# SUBMENU: ENCRYPTED SAFETY VAULT
+# SUBMENU: ENCRYPTED SAFETY VAULT (EXTENSION-AWARE & AUTO-PRUNING)
 # ==============================================================================
 
 def tool_manage_vault():
     while True:
         cfg = load_config()
         w = get_ui_width()
-        vault_files = list(VAULT_DIR.glob("*"))
+        vault_files = [f for f in VAULT_DIR.glob("*") if f.is_file()]
         enc_count = sum(1 for f in vault_files if f.suffix == ".enc")
+        total_mb = sum(f.stat().st_size for f in vault_files) / (1024 * 1024)
 
         def header_card():
             print(f"{CLR_CYAN}╭─ {BOLD}💡 ZERO-KNOWLEDGE BACKUP VAULT{NC} {CLR_CYAN}{'─' * max(0, w - 34)}╮{NC}")
             print(f"{CLR_CYAN}│{NC}  Saves original, unscrubbed copies before sanitizing.")
             print(f"{CLR_CYAN}│{NC}  • Encrypted with {BOLD}100,000-round PBKDF2 + AES keystream{NC}.")
-            print(f"{CLR_CYAN}│{NC}  • Stored: {BOLD}{len(vault_files)}{NC} total ({enc_count} AES-encrypted).")
+            print(f"{CLR_CYAN}│{NC}  • Stored: {BOLD}{len(vault_files)}{NC} files ({total_mb:.1f} MB / {cfg.get('vault_max_mb', 250)} MB Cap).")
+            print(f"{CLR_CYAN}│{NC}  • Auto-Prune: Removes backups older than {cfg.get('vault_max_days', 7)} days.")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
-        v_state = "[ON]" if cfg.get("enable_backup") else "[OFF]"
+        v_state = "[🟢 ON]" if cfg.get("enable_backup") else "[⚪ OFF]"
         menu_items = [
             ("1", f"🔐 Toggle Backup Vault {v_state}", "toggle"),
             ("2", "📦 Export & Decrypt All Backups to ~/Download/ShotClean_Restored", "export"),
-            ("3", "🗑️  Purge / Wipe Entire Vault Permanently", "purge"),
+            ("3", f"📏 Configure Storage Quota [{cfg.get('vault_max_mb', 250)} MB / {cfg.get('vault_max_days', 7)} Days]", "quota"),
+            ("4", "🗑️  Purge / Wipe Entire Vault Permanently", "purge"),
             ("0", "🔙 Back to Main Menu", "back"),
         ]
 
@@ -2129,26 +2431,45 @@ def tool_manage_vault():
             save_config(cfg)
 
         elif action == "export":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             if not vault_files:
                 print(f"  {CLR_AMBER}Vault is empty.{NC}"); time.sleep(1); continue
             out_dir = HOME / "Download" / "ShotClean_Restored"
             out_dir.mkdir(parents=True, exist_ok=True)
             secret = get_vault_secret()
+            restored_count = 0
             for vf in vault_files:
                 try:
                     if vf.suffix == ".enc":
                         plain = decrypt_payload(vf.read_bytes(), secret)
-                        (out_dir / (vf.stem + ".png")).write_bytes(plain)
+                        # Preserve original extension if present in vf.stem (e.g. photo_170000.jpg.enc -> photo_170000.jpg)
+                        out_name = vf.stem if Path(vf.stem).suffix else (vf.stem + ".png")
+                        (out_dir / out_name).write_bytes(plain)
                     else:
                         shutil.copy2(vf, out_dir / vf.name)
+                    restored_count += 1
                 except Exception:
                     pass
-            print(f"\n  {CLR_GREEN}✔ Decrypted and restored to:{NC}\n  {out_dir}")
+            print(f"\n  {CLR_GREEN}✔ Decrypted and restored {restored_count} file(s) to:{NC}\n  {out_dir}")
             input("\n  Press [Enter] to continue...")
 
+        elif action == "quota":
+            clear_screen()
+            print(f"\n  Current Max Vault Size: {cfg.get('vault_max_mb', 250)} MB")
+            mb_in = input("  New Max Size in MB (e.g. 250, or 0 for unlimited): ").strip()
+            if mb_in.isdigit():
+                cfg["vault_max_mb"] = int(mb_in)
+            print(f"\n  Current Retention Days: {cfg.get('vault_max_days', 7)} Days")
+            days_in = input("  New Retention Days (e.g. 7, or 0 for unlimited): ").strip()
+            if days_in.isdigit():
+                cfg["vault_max_days"] = int(days_in)
+            save_config(cfg)
+            prune_vault_storage(cfg)
+            print(f"  {CLR_GREEN}✔ Vault quota updated and applied.{NC}")
+            time.sleep(0.8)
+
         elif action == "purge":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             if input("\n  Permanently delete ALL backups in vault? [y/N]: ").strip().lower() in ["y", "yes"]:
                 for vf in vault_files: vf.unlink()
                 print(f"  {CLR_GREEN}✔ Vault purged.{NC}"); time.sleep(1)
@@ -2181,11 +2502,13 @@ def tool_privacy_canary():
         action = run_arrow_menu(header_card, menu_items, title="PRIVACY CANARY")
 
         if action == "generate":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             token = f"CANARY-{uuid.uuid4().hex[:8].upper()}"
             def_dir = detect_default_folder()
+            def_dir.mkdir(parents=True, exist_ok=True)
             canary_path = def_dir / f"test_canary_{token}.png"
             create_synthetic_png(canary_path)
+            GENERATED_NAMES_HISTORY.append(canary_path.name)
 
             EXIFTOOL_ENGINE.execute(
                 f"-Artist={token}",
@@ -2195,6 +2518,7 @@ def tool_privacy_canary():
                 str(canary_path),
                 timeout=4.0
             )
+            record_file_in_ledger(canary_path)
 
             print(f"\n  {CLR_GREEN}{BOLD}✔ Canary Generated Successfully!{NC}")
             print(f"  Token : {BOLD}{token}{NC}")
@@ -2203,7 +2527,7 @@ def tool_privacy_canary():
             input("\n  Press [Enter] to continue...")
 
         elif action == "audit":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             path_str = input("\n  Enter path to downloaded image (or drag & drop): ").strip().strip("'\"")
             p = Path(path_str)
             if not p.exists() or not p.is_file():
@@ -2225,8 +2549,45 @@ def tool_privacy_canary():
 
 
 # ==============================================================================
-# SUBMENU: ENGINE DIAGNOSTICS & SYSTEM SETTINGS
+# SUBMENU: ENGINE DIAGNOSTICS, WIDGET SHORTCUTS & SYSTEM SETTINGS
 # ==============================================================================
+
+def install_termux_widget_shortcuts():
+    """Creates one-tap home screen scripts in ~/.shortcuts for Termux:Widget."""
+    shortcuts_dir = HOME / ".shortcuts"
+    shortcuts_dir.mkdir(parents=True, exist_ok=True)
+
+    scripts = {
+        "ShotClean_Sweep_Now.sh": (
+            "#!/data/data/com.termux/files/usr/bin/bash\n"
+            "shotclean --sweep\n"
+            "command -v termux-toast >/dev/null 2>&1 && termux-toast -g bottom 'ShotClean: Folder Sweep Complete!'\n"
+        ),
+        "ShotClean_Status.sh": (
+            "#!/data/data/com.termux/files/usr/bin/bash\n"
+            "shotclean --status\n"
+            "echo ''\n"
+            "read -p 'Press [Enter] to close...'\n"
+        ),
+        "ShotClean_Start_Daemon.sh": (
+            "#!/data/data/com.termux/files/usr/bin/bash\n"
+            "shotclean --daemon >> \"$HOME/.shotclean/boot.log\" 2>&1 &\n"
+            "command -v termux-toast >/dev/null 2>&1 && termux-toast -g bottom 'ShotClean: Background Shield Started'\n"
+        ),
+        "ShotClean_Stop_Daemon.sh": (
+            "#!/data/data/com.termux/files/usr/bin/bash\n"
+            "shotclean --stop\n"
+            "command -v termux-toast >/dev/null 2>&1 && termux-toast -g bottom 'ShotClean: Background Shield Stopped'\n"
+        ),
+    }
+
+    for name, content in scripts.items():
+        sp = shortcuts_dir / name
+        sp.write_text(content, encoding="utf-8")
+        sp.chmod(0o755)
+
+    return shortcuts_dir
+
 
 def tool_engine_diagnostics():
     while True:
@@ -2248,6 +2609,8 @@ def tool_engine_diagnostics():
             ("1", "⚡ Force Restart ExifTool Daemon Pipe", "restart"),
             ("2", "🏓 Ping Daemon Latency", "ping"),
             ("3", f"🔔 Toggle System Notification Toasts {notif_state}", "toggle_notif"),
+            ("4", "📱 Install Termux:Widget Home Screen Shortcuts (~/.shortcuts)", "widget"),
+            ("5", "🚀 Install Auto-Boot Service (Termux:Boot / systemd / LaunchAgent)", "boot_service"),
             ("0", "🔙 Back to Main Menu", "back"),
         ]
 
@@ -2259,7 +2622,7 @@ def tool_engine_diagnostics():
             time.sleep(1)
 
         elif action == "ping":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             t0 = time.time()
             test_out = EXIFTOOL_ENGINE.execute("-ver", timeout=3.0)
             elapsed = int((time.time() - t0) * 1000)
@@ -2272,6 +2635,22 @@ def tool_engine_diagnostics():
             save_config(cfg)
             print(f"  {CLR_GREEN}✔ Notifications toggled.{NC}")
             time.sleep(0.8)
+
+        elif action == "widget":
+            clear_screen()
+            s_dir = install_termux_widget_shortcuts()
+            print(f"\n  {CLR_GREEN}{BOLD}✔ Termux:Widget shortcuts installed to:{NC} {s_dir}")
+            print("  Add the Termux:Widget widget to your Android home screen to tap:")
+            print("   • ShotClean_Sweep_Now.sh")
+            print("   • ShotClean_Start_Daemon.sh")
+            print("   • ShotClean_Stop_Daemon.sh")
+            print("   • ShotClean_Status.sh\n")
+            input("  Press [Enter] to continue...")
+
+        elif action == "boot_service":
+            clear_screen()
+            install_system_service()
+            input("\n  Press [Enter] to continue...")
 
         elif action in ("back", None):
             break
@@ -2292,66 +2671,70 @@ def tool_feature_guide():
         menu_items = [
             ("1", "🏷️  EXIF / XMP / IPTC Metadata Stripping", "exif"),
             ("2", "🎨 Display ICC Color Profile Removal", "icc"),
-            ("3", "🔥 Scorched Earth Canvas Re-encoding", "scorch"),
+            ("3", "🔥 Scorched Earth & Anti-pHash Pixel Dithering", "scorch"),
             ("4", "🎲 Decoy Presets & Diceware Word Slugs", "naming"),
             ("5", "🔢 Sequential Numbering & State Tracking", "seq"),
             ("6", "⏱️  Anti-Forensic Timestamp Clamping & Day-Fuzzing", "time"),
-            ("7", "🧹 Active Catch-Up & Periodic Sweeper", "sweeper"),
-            ("8", "🔐 Encrypted Safety Vault (AES-Authenticated)", "vault"),
-            ("9", "📁 Granular Per-Folder Rules Explanation", "folders"),
+            ("7", "🧹 Active Sweeper & Persistent Scrubbed Ledger", "sweeper"),
+            ("8", "🔐 Encrypted Safety Vault (Extension-Aware + Quota)", "vault"),
+            ("9", "📁 Granular Per-Folder Rules & Recursive Scope", "folders"),
             ("0", "🔙 Back to Main Menu", "back"),
         ]
 
         action = run_arrow_menu(header_card, menu_items, title="FIELD MANUAL")
 
         if action == "exif":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== 🏷️ EXIF METADATA STRIPPING ==={NC}\n")
             print("  Wipes camera model, manufacturer, serial numbers, lens info, and GPS coordinates.")
             input("\n  Press [Enter] to return...")
         elif action == "icc":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== 🎨 ICC PROFILE REMOVAL ==={NC}\n")
             print("  Removes display panel color profiles that fingerprint specific phone models.")
             input("\n  Press [Enter] to return...")
         elif action == "scorch":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🔥 SCORCHED EARTH CANVAS RE-ENCODING ==={NC}\n")
-            print("  Demuxes raw pixels into memory and writes a clean PNG/image container from scratch.")
+            clear_screen()
+            print(f"{CLR_CYAN}=== 🔥 SCORCHED EARTH & SUB-PERCEPTUAL PIXEL DITHERING ==={NC}\n")
+            print("  Demuxes raw pixels into memory and writes a clean image container from scratch.")
             print("  Drops all trailing payloads after IEND, hardware signatures, and steganographic data.")
+            print("  When Pixel Dithering is ON, applies a +-1 RGB jitter to 2% of pixels to defeat perceptual")
+            print("  hashing (pHash/dHash) and LSB watermarks without any visible change.")
             input("\n  Press [Enter] to return...")
         elif action == "naming":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== 🎲 DECOY PRESETS & WORD SLUGS ==={NC}\n")
             print("  Provides plausible deniability by mimicking everyday apps (WhatsApp, DCIM) or generating readable slugs.")
             input("\n  Press [Enter] to return...")
         elif action == "seq":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== 🔢 SEQUENTIAL NUMBERING ==={NC}\n")
             print("  Generates ordered series (IMG_0001, IMG_0002) with persistent state tracking.")
             input("\n  Press [Enter] to return...")
         elif action == "time":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING & DAY-FUZZING ==={NC}\n")
             print("  Static 2020: Forces modification dates to 2020-01-01 to eliminate temporal correlation.")
             print("  Day-Fuzz: Stamps photos to Today at 00:00:00 so they stay in Today's Gallery feed while masking seconds!")
             input("\n  Press [Enter] to return...")
         elif action == "sweeper":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 🧹 ACTIVE CATCH-UP & PERIODIC SWEEPER ==={NC}\n")
+            clear_screen()
+            print(f"{CLR_CYAN}=== 🧹 ACTIVE SWEEPER & PERSISTENT LEDGER ==={NC}\n")
             print("  Automatically checks monitored folders on startup or periodically every X minutes.")
-            print("  If you took photos while ShotClean was closed, the sweeper detects and sanitizes them immediately.")
+            print("  Maintains ~/.shotclean/scrubbed_ledger.json so files using Word Slugs or Decoy names")
+            print("  are never re-renamed across restarts.")
             input("\n  Press [Enter] to return...")
         elif action == "vault":
-            os.system("cls" if os.name == "nt" else "clear")
+            clear_screen()
             print(f"{CLR_CYAN}=== 🔐 ENCRYPTED SAFETY VAULT ==={NC}\n")
-            print("  Keeps encrypted PBKDF2 + AES backups in ~/.shotclean/vault/ before scrubbing.")
+            print("  Keeps encrypted PBKDF2 + AES backups in ~/.shotclean/vault/ before scrubbing,")
+            print("  preserving original extensions (.jpg, .webp, .png) and auto-pruning by size/age.")
             input("\n  Press [Enter] to return...")
         elif action == "folders":
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"{CLR_CYAN}=== 📁 GRANULAR PER-FOLDER RULES ==={NC}\n")
-            print("  Screenshots can use 'Ghost' (maximum scrub), while Camera folders can use")
-            print("  'Balanced' (shows under Today's feed with a word slug).")
+            clear_screen()
+            print(f"{CLR_CYAN}=== 📁 GRANULAR PER-FOLDER RULES & RECURSIVE SCOPE ==={NC}\n")
+            print("  Each folder has independent rules, optional Recursive Subfolder monitoring,")
+            print("  and optional support for screen recordings (.mp4/.mov) and PDF documents.")
             input("\n  Press [Enter] to return...")
         elif action in ("back", None):
             break
@@ -2362,7 +2745,7 @@ def tool_feature_guide():
 # ==============================================================================
 
 def tool_live_audit():
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_screen()
     w = get_ui_width()
     print(f"{CLR_CYAN}╭─ {BOLD}💡 HOW THE LIVE METADATA AUDITOR WORKS{NC} {CLR_CYAN}{'─' * max(0, w - 42)}╮{NC}")
     print(f"{CLR_CYAN}│{NC}  Scans the most recent capture for remaining tracking tags.")
@@ -2373,12 +2756,11 @@ def tool_live_audit():
     for f in cfg.get("folders_v2", []):
         p = Path(f["path"])
         if p.exists():
-            for ext in VALID_EXTENSIONS:
-                candidates.extend(p.glob(f"*{ext}"))
+            candidates.extend(iter_monitored_files(p, f))
 
     valid_candidates = [c for c in candidates if c.exists()]
     if not valid_candidates:
-        print(f"  {CLR_AMBER}✖ No images found across registered folders.{NC}\n")
+        print(f"  {CLR_AMBER}✖ No files found across registered folders.{NC}\n")
         input("  Press [Enter] to return...")
         return
 
@@ -2410,7 +2792,7 @@ def tool_live_audit():
 
 
 def tool_live_logs():
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_screen()
     w = get_ui_width()
     print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
     print(f"{CLR_CYAN}│{NC}  {BOLD}📜  LIVE ACTIVITY LOG STREAM{NC}")
@@ -2445,26 +2827,26 @@ def tool_live_logs():
 
 
 def tool_bulk_clean():
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_screen()
     cfg = load_config()
     print(f"{CLR_CYAN}=== Bulk Folder Scrubber ==={NC}\n")
-    folders = [Path(f["path"]) for f in cfg.get("folders_v2", []) if Path(f["path"]).exists()]
-    confirm = input("  Scrub all existing photos across registered folders? [y/N]: ").strip().lower()
+    confirm = input("  Scrub all existing files across registered folders? [y/N]: ").strip().lower()
     if confirm not in ["y", "yes"]:
         return
 
     all_images = []
-    for folder in folders:
-        for ext in VALID_EXTENSIONS:
-            all_images.extend([img for img in folder.glob(f"*{ext}") if not img.name.startswith(".")])
+    for folder_cfg in cfg.get("folders_v2", []):
+        p = Path(folder_cfg["path"])
+        if p.exists():
+            all_images.extend(iter_monitored_files(p, folder_cfg))
 
     total = len(all_images)
     if total == 0:
-        print(f"  {CLR_AMBER}No images found.{NC}")
+        print(f"  {CLR_AMBER}No matching files found.{NC}")
         time.sleep(1)
         return
 
-    print(f"\n  Found {total} images. Scrubbing via Persistent ExifTool Pipe...")
+    print(f"\n  Found {total} files. Scrubbing via Persistent ExifTool Pipe...")
     for i, img in enumerate(all_images, 1):
         percent = int((i / total) * 100)
         bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
@@ -2473,7 +2855,7 @@ def tool_bulk_clean():
 
         rules = get_rules_for_file(img, cfg)
         if rules.get("scorched_earth", False):
-            reencode_scorched_earth(img)
+            reencode_scorched_earth(img, pixel_dither=bool(rules.get("pixel_dither", False)))
 
         if rules.get("strip_exif", True):
             args = ["-all="]
@@ -2494,12 +2876,14 @@ def tool_bulk_clean():
             except OSError:
                 pass
 
-    print(f"\n\n  {CLR_GREEN}✔ Bulk scrub complete for {total} images.{NC}\n")
+        record_file_in_ledger(img)
+
+    print(f"\n\n  {CLR_GREEN}✔ Bulk scrub complete for {total} files.{NC}\n")
     time.sleep(1.2)
 
 
 def tool_manual_check_updates():
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_screen()
     print(f"\n  {CLR_CYAN}Querying GitHub for latest commit on 'main'...{NC}")
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
@@ -2525,7 +2909,7 @@ def tool_manual_check_updates():
 # ==============================================================================
 
 def install_system_service():
-    """Generates and deploys background service unit for current OS."""
+    """Generates and deploys background service unit + Termux:Widget shortcuts."""
     os_name = SystemDoctor.get_os_string()
     print(f"\n  {CLR_CYAN}Installing ShotClean background service for: {os_name}...{NC}")
 
@@ -2539,8 +2923,9 @@ def install_system_service():
             'exec shotclean --daemon >> "$HOME/.shotclean/boot.log" 2>&1 &\n'
         )
         boot_script.chmod(0o755)
+        s_dir = install_termux_widget_shortcuts()
         print(f"  {CLR_GREEN}✔ Created Termux:Boot daemon script: {boot_script}{NC}")
-        print("  Make sure Termux:Boot is installed from F-Droid.")
+        print(f"  {CLR_GREEN}✔ Created Termux:Widget home screen shortcuts: {s_dir}{NC}")
 
     elif "Linux" in os_name:
         systemd_dir = HOME / ".config" / "systemd" / "user"
@@ -2623,13 +3008,16 @@ def show_cli_status():
 
     cfg = load_config()
     folders = cfg.get("folders_v2", [])
-    print("ShotClean System Status:")
+    ledger_count = len(_load_ledger_unlocked())
+    print(f"ShotClean v{CURRENT_VERSION} System Status:")
     print(f"  Daemon State       : {'RUNNING (PID ' + pid_str + ')' if running else 'STOPPED'}")
     print(f"  Active Sweeper     : {'Enabled' if cfg.get('active_sweeper', True) else 'Disabled'}")
+    print(f"  Scrubbed Ledger    : {ledger_count} tracked file(s)")
     print(f"  Notifications      : {'Enabled' if cfg.get('enable_notifications', False) else 'Disabled'}")
     print(f"  Watched Directories: {len(folders)}")
     for f in folders:
-        print(f"    • {f.get('path')} [{f.get('profile', 'custom').upper()}]")
+        rec = " (Recursive)" if f.get("recursive") else ""
+        print(f"    • {f.get('path')} [{f.get('profile', 'custom').upper()}]{rec}")
 
 
 # ==============================================================================
@@ -2662,8 +3050,9 @@ def main():
     parser.add_argument("--daemon", action="store_true", help="Run as silent headless background daemon")
     parser.add_argument("--stop", action="store_true", help="Stop any active background daemon")
     parser.add_argument("--status", action="store_true", help="Print active daemon and monitoring status")
+    parser.add_argument("--sweep", action="store_true", help="Run an immediate one-shot catch-up sweep across watched folders")
     parser.add_argument("--clean", type=str, help="One-shot clean a single file or directory and exit")
-    parser.add_argument("--install-service", action="store_true", help="Install auto-start system service")
+    parser.add_argument("--install-service", action="store_true", help="Install auto-start system service and Termux:Widget shortcuts")
     args = parser.parse_args()
 
     if args.daemon:
@@ -2678,13 +3067,19 @@ def main():
         show_cli_status()
         return
 
+    if args.sweep:
+        run_active_directory_sweep()
+        WORK_QUEUE.join()
+        print("✔ Active folder sweep finished.")
+        return
+
     if args.clean:
         p = Path(args.clean)
         if p.is_file():
             res = sanitize_single_file(p)
             print(f"Cleaned: {res}")
         elif p.is_dir():
-            for ext in VALID_EXTENSIONS:
+            for ext in ALL_SUPPORTED_EXTENSIONS:
                 for img in p.glob(f"*{ext}"):
                     sanitize_single_file(img)
             print(f"Scrubbed directory: {p}")
@@ -2696,7 +3091,10 @@ def main():
         install_system_service()
         return
 
-    # Interactive TUI mode
+    # Interactive TUI mode (ensure stdin is attached to /dev/tty even if piped from curl | bash)
+    if not ensure_tty_stdin():
+        run_daemon_mode()
+        return
     DaemonManager.start()
     threading.Thread(target=check_updates_background, daemon=True).start()
 
@@ -2712,7 +3110,7 @@ def main():
         ("9", "🧹 Bulk Folder Scrubber", "bulk"),
         ("10", "📜 Live Event Stream Logs", "logs"),
         ("11", "🐤 Privacy Canary Tester", "canary"),
-        ("12", "🔬 Engine Diagnostics & Settings", "diagnostics"),
+        ("12", "🔬 Engine Diagnostics & Shortcuts", "diagnostics"),
         ("13", "🔄 Check for Updates", "update"),
         ("14", "📖 Privacy Field Manual", "manual"),
         ("0", "🚪 Exit Suite", "exit"),
