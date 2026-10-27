@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ShotClean Universal Studio v5.7.0
+ShotClean Universal Studio v5.7.1
 Cross-platform metadata stripper, anti-forensics suite & granular folder protection.
 Repository: https://github.com/zakeer-career/shotclean
 """
@@ -61,7 +61,7 @@ def fetch_web_resource(url: str, timeout: float = 6.0) -> str:
 # VERSION & BULLETPROOF AUTO-UPDATER
 # ==============================================================================
 
-CURRENT_VERSION = "5.7.0"
+CURRENT_VERSION = "5.7.1"
 GITHUB_REPO = "zakeer-career/shotclean"
 
 UPDATE_AVAILABLE = False
@@ -2657,86 +2657,350 @@ def tool_engine_diagnostics():
 
 
 # ==============================================================================
-# SUBMENU: FIELD MANUAL
+# SUBMENU: INTERACTIVE PRIVACY FIELD MANUAL (EASY-TO-UNDERSTAND GUIDE)
 # ==============================================================================
 
+MANUAL_TOPICS = [
+    (
+        "1",
+        "🚀 Quick Start: Which Preset Should I Choose?",
+        "quickstart",
+        "🚀 QUICK START: WHICH PRESET SHOULD I CHOOSE?",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 In Plain English:{NC}", [
+                "Not sure where to start? ShotClean includes 6 ready-to-use presets.",
+                "Pick the one that matches how you use your phone or computer:"
+            ]),
+            (f"{CLR_GREEN}{BOLD}1. 🛡️ GHOST (Best for Maximum Anonymity):{NC}", [
+                "• Wipes all EXIF/ICC tags, renames to a random hash (img_7c9f2b84.png),",
+                "  and freezes the file date to Jan 1, 2020.",
+                "• Note: Because the date becomes 2020, your Gallery app will sort these",
+                "  screenshots down into the year 2020 instead of 'Today'."
+            ]),
+            (f"{CLR_GREEN}{BOLD}2. ⚖️ BALANCED (Best for Everyday Use):{NC}", [
+                "• Wipes all EXIF/ICC tags and renames to an easy-to-read Word Slug",
+                "  (like 'swift-falcon-42.png'), while keeping Today's date.",
+                "• Your screenshots stay at the top of your Gallery under 'Today'!"
+            ]),
+            (f"{CLR_GREEN}{BOLD}3. 🔥 SCORCHED EARTH (Best Against Advanced Forensics):{NC}", [
+                "• Rebuilds the image pixels from scratch to destroy hidden trailing data,",
+                "  applies invisible pixel dithering to defeat AI/hash tracking, and strips all tags."
+            ]),
+            (f"{CLR_GREEN}{BOLD}4. 🔢 SEQUENTIAL (Best for Clean Organization):{NC}", [
+                "• Scrubs metadata and names files in neat order: IMG_0001.png, IMG_0002.png."
+            ]),
+            (f"{CLR_GREEN}{BOLD}5. 🏷️ METADATA STRIP ONLY:{NC}", [
+                "• Removes hidden EXIF/GPS/ICC data inside the file, but keeps your original",
+                "  filename and date untouched."
+            ]),
+        ]
+    ),
+    (
+        "2",
+        "🏷️  EXIF / XMP / IPTC Metadata Stripping",
+        "exif",
+        "🏷️ EXIF, XMP & IPTC METADATA STRIPPING",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Every time you take a photo or screenshot, your device secretly writes",
+                "invisible text inside the file called 'EXIF/XMP metadata'."
+            ]),
+            (f"{CLR_RED}{BOLD}🚨 What Danger Does It Stop?{NC}", [
+                "Without ShotClean, sharing a single image can leak:",
+                "• Your exact GPS home/work coordinates (latitude, longitude & altitude).",
+                "• Your exact phone brand, model (e.g. Galaxy S24 / Pixel 9), and OS build.",
+                "• Camera serial numbers and the exact second the photo was taken."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How ShotClean Protects You:{NC}", [
+                "ShotClean uses a persistent high-speed ExifTool engine to strip 100% of",
+                "EXIF, XMP, and IPTC metadata tags in ~30 milliseconds—without lowering",
+                "your image quality."
+            ]),
+            (f"{CLR_GREEN}{BOLD}✅ Pro Tip:{NC}", [
+                "Keep EXIF Stripping ON for all folders. Use Option [8] Live EXIF Audit",
+                "anytime to verify your latest screenshot has zero remaining tags."
+            ]),
+        ]
+    ),
+    (
+        "3",
+        "🎨 Display ICC Color Profile Removal",
+        "icc",
+        "🎨 DISPLAY ICC COLOR PROFILE REMOVAL",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "An ICC Profile is a hidden color calibration table embedded into screenshots",
+                "by your screen hardware (OLED/AMOLED/Retina)."
+            ]),
+            (f"{CLR_RED}{BOLD}🚨 What Danger Does It Stop?{NC}", [
+                "Even if you remove standard EXIF tags, forensic investigators can inspect",
+                "the ICC color profile to fingerprint the exact display panel manufacturer",
+                "and match a screenshot back to your specific device model."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How ShotClean Protects You:{NC}", [
+                "ShotClean deletes the embedded ICC profile chunk (-icc_profile:all=),",
+                "leaving standard neutral sRGB pixels that cannot be tied to your screen."
+            ]),
+            (f"{CLR_GREEN}{BOLD}✅ Pro Tip:{NC}", [
+                "Removing ICC profiles does not noticeably change how screenshots look,",
+                "so keep this ON for maximum hardware anonymity."
+            ]),
+        ]
+    ),
+    (
+        "4",
+        "🔥 Scorched Earth & Anti-pHash Pixel Dithering",
+        "scorch",
+        "🔥 SCORCHED EARTH & SUB-PERCEPTUAL PIXEL DITHERING",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Standard metadata strippers only clean the header of a file. 'Scorched Earth'",
+                "reads only the visual pixels into memory and builds a brand-new image file",
+                "from scratch."
+            ]),
+            (f"{CLR_RED}{BOLD}🚨 What Danger Does It Stop?{NC}", [
+                "• Trailing Data Leaks: Some apps hide tracking IDs after the end of a PNG/JPG.",
+                "• Perceptual Hash Tracking (pHash): Platforms compute a visual fingerprint",
+                "  of your image to link uploads across different anonymous accounts.",
+                "• Steganography: Invisible watermarks hidden inside pixel color values."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How Pixel Dithering Works:{NC}", [
+                "When Pixel Dithering is ON, ShotClean tweaks ~2% of pixels by just +-1",
+                "in RGB color value. To the human eye, the image looks 100% identical,",
+                "but automated hash scanners and LSB watermarks are completely broken."
+            ]),
+            (f"{CLR_GREEN}{BOLD}✅ Where to Enable It:{NC}", [
+                "Go to [2] Manage Folders -> Select Folder -> Choose [3] Scorched Earth Preset,",
+                "or toggle [4] Scorched Earth and [5] Pixel Dithering individually."
+            ]),
+        ]
+    ),
+    (
+        "5",
+        "🎭 Naming Camouflage: Hash, Word Slugs & Decoys",
+        "naming",
+        "🎭 NAMING CAMOUFLAGE: HASH, WORD SLUGS & DECOYS",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Default filenames like 'Screenshot_20261027-080512_Chrome.png' reveal",
+                "the exact date, second, and even which app you were using!"
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ Choose Your Camouflage Style (Option [5]):{NC}", [
+                "• 🛡️ UUID Hex Hash   : 'img_7c9f2b84e1a0.png' (Unpredictable random code)",
+                "• 🔤 Word Slug       : 'swift-falcon-42.png' (Easy to read & remember!)",
+                "• 💬 WhatsApp Decoy  : 'IMG-20261027-WA0042.png' (Looks like a chat image)",
+                "• 📷 Camera Decoy    : 'DSC_4821.png' (Looks like a normal digital camera photo)",
+                "• 🌐 Reddit Decoy    : 'RDT_20261027_140218.png' (Looks like a web download)"
+            ]),
+            (f"{CLR_GREEN}{BOLD}✅ Why Decoys Are Clever:{NC}", [
+                "A random hash tells someone 'I used a privacy tool'. A WhatsApp or Camera",
+                "decoy blends right in with everyday files for plausible deniability!"
+            ]),
+        ]
+    ),
+    (
+        "6",
+        "🔢 Sequential Numbering & Collision Protection",
+        "seq",
+        "🔢 SEQUENTIAL NUMBERING (IMG_0001, IMG_0002)",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Renames your screenshots in a clean, ordered sequence like IMG_0001.png,",
+                "IMG_0002.png, IMG_0003.png—hiding the original timestamp and app name",
+                "while keeping your files neatly sorted."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ Smart Collision Protection:{NC}", [
+                "• ShotClean remembers your counter inside config.json even after rebooting.",
+                "• Before renaming a file, it checks the folder to make sure that number",
+                "  isn't already taken—so it will NEVER overwrite an existing photo.",
+                "• You can customize the Prefix ('SCAN_'), Suffix ('_safe'), and Padding",
+                "  (3 to 6 digits, e.g., 001 vs 00001) in Option [5] Naming Studio."
+            ]),
+        ]
+    ),
+    (
+        "7",
+        "⏱️  Timestamp Clamping (2020 vs Today's Day-Fuzz)",
+        "time",
+        "⏱️ TIMESTAMP CLAMPING & DAY-FUZZING",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Even after wiping EXIF and renaming a file, the operating system stores",
+                "a 'Date Modified' and 'Date Accessed' timestamp on disk."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ Which Clamping Mode Should You Use? (Option [6]):{NC}", [
+                "• 🛡️ Static 2020-01-01 : Sets every file's date to Jan 1, 2020 00:00:00.",
+                "  (Maximum privacy, but Gallery apps sort photos into January 2020).",
+                "• ☀️ Today's Midnight (Day-Fuzz) : Sets the time to TODAY at 00:00:00.",
+                "  (Hides the hour, minute & second you took the shot, while keeping",
+                "  the photo at the very top of your Gallery's 'Today' view!)",
+                "• 🎲 Random Past Date : Picks a random date between 2020 and 2022 so",
+                "  multiple screenshots cannot be grouped together.",
+                "• ✏️ Custom Date : Stamp any exact date/time you choose."
+            ]),
+        ]
+    ),
+    (
+        "8",
+        "🧹 Active Sweeper & Persistent Scrubbed Ledger",
+        "sweeper",
+        "🧹 ACTIVE CATCH-UP SWEEPER & SCRUBBED LEDGER",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Problem Does This Solve?{NC}", [
+                "What if you took screenshots while Termux or ShotClean was closed?",
+                "Normally, background monitors miss files created while offline."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How the Active Sweeper Works (Option [3]):{NC}", [
+                "• Startup Catch-Up : The moment you launch ShotClean, it scans your",
+                "  monitored folders and scrubs any photos taken while it was off.",
+                "• Periodic Heartbeat : Every 10 minutes (customizable), it sweeps",
+                "  folders in the background to catch any files Android hid from inotify.",
+                "• Persistent Ledger (~/.shotclean/scrubbed_ledger.json) : Remembers",
+                "  already-cleaned files by size & timestamp so Word Slugs and Decoys",
+                "  are NEVER renamed twice when you restart the app!"
+            ]),
+        ]
+    ),
+    (
+        "9",
+        "🔐 Encrypted Safety Vault & Auto-Pruning Quota",
+        "vault",
+        "🔐 ENCRYPTED SAFETY BACKUP VAULT",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 What Is It? (In Plain English):{NC}", [
+                "Worried you might need the original unscrubbed photo later? The Safety",
+                "Vault saves an encrypted backup copy before ShotClean modifies your file."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How It Protects Your Storage & Privacy (Option [7]):{NC}", [
+                "• Military-Grade Encryption : Backups are locked with 100,000-round",
+                "  PBKDF2 + AES keystream (.enc) so Gallery apps and other apps cannot read them.",
+                "• Original Format Preserved : Restoring decrypts .jpg, .webp, or .png",
+                "  files back to their exact original extension in ~/Download/ShotClean_Restored.",
+                "• Auto-Pruning Quota : Automatically deletes backups older than 7 days",
+                "  or over 250 MB (configurable) so your phone storage never fills up!"
+            ]),
+        ]
+    ),
+    (
+        "10",
+        "📁 Per-Folder Rules, Recursive Scope & Video/PDF",
+        "folders",
+        "📁 PER-FOLDER GRANULAR RULES & EXTENDED SCOPE",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 Independent Rules for Every Folder (Option [2]):{NC}", [
+                "You don't have to use the same settings everywhere! For example:",
+                "• Folder 1 (Screenshots) -> Use 'Ghost' or 'Scorched Earth'.",
+                "• Folder 2 (Camera/DCIM) -> Use 'Balanced' so camera photos stay in Today.",
+                "• Folder 3 (Downloads)   -> Use 'Metadata Strip Only' to keep filenames."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ Recursive Subfolders & Screen Recordings:{NC}", [
+                "• 📂 Recursive Subfolders [ON/OFF] : Point ShotClean at /Pictures and",
+                "  automatically protect all sub-albums (WhatsApp, Telegram, Reddit).",
+                "• 🎬 Video & PDF Support [ON/OFF] : Scrubs metadata from screen",
+                "  recordings (.mp4, .mov) and downloaded documents (.pdf)!"
+            ]),
+        ]
+    ),
+    (
+        "11",
+        "🐤 Privacy Canary Tester (Audit Social & Chat Apps)",
+        "canary",
+        "🐤 PRIVACY CANARY TESTER (OPTION [11])",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 How Do You Know If an App Strips Metadata?{NC}", [
+                "Apps like WhatsApp, Telegram (Send as File), Discord, or email clients",
+                "often claim to compress images, but many secretly keep tracking tags."
+            ]),
+            (f"{CLR_CYAN}{BOLD}⚙️ How to Run a 30-Second Canary Test:{NC}", [
+                "1. Open Option [11] Privacy Canary Tester -> Select [1] Generate Canary.",
+                "2. ShotClean creates a small blue test image with a harmless fake token",
+                "   (e.g. CANARY-8F92A1B0) inside its EXIF tags.",
+                "3. Send that image to yourself on Discord/Telegram/WhatsApp and download it.",
+                "4. Select [2] Audit Downloaded Image: ShotClean will tell you immediately",
+                "   if the platform leaked the token or stripped it!"
+            ]),
+        ]
+    ),
+    (
+        "12",
+        "📱 Home Screen Widgets & CLI Commands",
+        "cli",
+        "📱 HOME SCREEN WIDGETS & TERMINAL COMMANDS",
+        [
+            (f"{CLR_AMBER}{BOLD}💡 Control ShotClean Without Opening Menus:{NC}", [
+                "You can control ShotClean from your Android home screen or terminal scripts."
+            ]),
+            (f"{CLR_CYAN}{BOLD}📱 Android Home Screen Shortcuts (Termux:Widget):{NC}", [
+                "Go to Option [12] Engine Diagnostics -> [4] Install Termux:Widget Shortcuts.",
+                "Then add the Termux:Widget to your home screen for 1-tap buttons:",
+                "• ShotClean_Sweep_Now.sh    (Instant catch-up scrub with toast popup)",
+                "• ShotClean_Start_Daemon.sh (Start background shield silently)",
+                "• ShotClean_Stop_Daemon.sh  (Pause background shield)",
+                "• ShotClean_Status.sh       (View live status summary)"
+            ]),
+            (f"{CLR_GREEN}{BOLD}💻 Command-Line Flags:{NC}", [
+                "• shotclean --daemon          (Run silently in the background)",
+                "• shotclean --sweep           (Scrub all watched folders once and exit)",
+                "• shotclean --clean file.png  (Scrub a specific file or folder)",
+                "• shotclean --status          (Check if background daemon is running)",
+                "• shotclean --stop            (Stop background daemon)"
+            ]),
+        ]
+    ),
+]
+
+
+def show_manual_topic_page(topic_idx: int) -> int:
+    """Displays a rich, easy-to-read manual page with Next/Prev arrow navigation."""
+    total = len(MANUAL_TOPICS)
+    while True:
+        clear_screen()
+        w = get_ui_width()
+        num_str, short_title, _, page_title, sections = MANUAL_TOPICS[topic_idx]
+
+        print(f"{CLR_CYAN}╭{'─' * (w - 2)}╮{NC}")
+        print(f"{CLR_CYAN}│{NC}  {BOLD}📖  FIELD MANUAL ({topic_idx + 1}/{total}){NC}")
+        print(f"{CLR_CYAN}│{NC}  {CLR_WHITE}{BOLD}{truncate_middle(page_title, w - 6)}{NC}")
+        print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
+
+        for sec_header, bullets in sections:
+            print(f"  {sec_header}")
+            for line in bullets:
+                print(f"    {line}")
+            print()
+
+        print(f"{CLR_BORDER}{'─' * w}{NC}")
+        print(f"  {CLR_BLUE}[←/P] Prev Topic · [→/N] Next Topic · [Enter/Q] Back to Topics{NC}")
+
+        key = read_single_key()
+        if key in ("RIGHT", "n", "N", "DOWN"):
+            topic_idx = (topic_idx + 1) % total
+        elif key in ("LEFT", "p", "P", "UP"):
+            topic_idx = (topic_idx - 1) % total
+        elif key in ("ENTER", "QUIT", "ESC", "0", "b", "B", "NO_TTY"):
+            return topic_idx
+
+
 def tool_feature_guide():
+    cursor_idx = 0
     while True:
         w = get_ui_width()
         def header_card():
-            print(f"{CLR_CYAN}╭─ {BOLD}💡 PRIVACY THREAT MODEL & DEFENSE GUIDE{NC} {CLR_CYAN}{'─' * max(0, w - 43)}╮{NC}")
-            print(f"{CLR_CYAN}│{NC}  Select any feature below to understand what it protects.")
+            print(f"{CLR_CYAN}╭─ {BOLD}📖 INTERACTIVE PRIVACY FIELD MANUAL{NC} {CLR_CYAN}{'─' * max(0, w - 39)}╮{NC}")
+            print(f"{CLR_CYAN}│{NC}  Easy-to-understand guide to every ShotClean privacy feature.")
+            print(f"{CLR_CYAN}│{NC}  {DIM}Tip: Inside any topic, use [←/→] or [N/P] to flip pages!{NC}")
             print(f"{CLR_CYAN}╰{'─' * (w - 2)}╯{NC}\n")
 
         menu_items = [
-            ("1", "🏷️  EXIF / XMP / IPTC Metadata Stripping", "exif"),
-            ("2", "🎨 Display ICC Color Profile Removal", "icc"),
-            ("3", "🔥 Scorched Earth & Anti-pHash Pixel Dithering", "scorch"),
-            ("4", "🎲 Decoy Presets & Diceware Word Slugs", "naming"),
-            ("5", "🔢 Sequential Numbering & State Tracking", "seq"),
-            ("6", "⏱️  Anti-Forensic Timestamp Clamping & Day-Fuzzing", "time"),
-            ("7", "🧹 Active Sweeper & Persistent Scrubbed Ledger", "sweeper"),
-            ("8", "🔐 Encrypted Safety Vault (Extension-Aware + Quota)", "vault"),
-            ("9", "📁 Granular Per-Folder Rules & Recursive Scope", "folders"),
-            ("0", "🔙 Back to Main Menu", "back"),
+            (num, label, idx) for idx, (num, label, _, _, _) in enumerate(MANUAL_TOPICS)
         ]
+        menu_items.append(("0", "🔙 Back to Main Menu", "back"))
 
-        action = run_arrow_menu(header_card, menu_items, title="FIELD MANUAL")
+        action = run_arrow_menu(header_card, menu_items, title="SELECT A TOPIC TO READ", default_idx=cursor_idx)
 
-        if action == "exif":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🏷️ EXIF METADATA STRIPPING ==={NC}\n")
-            print("  Wipes camera model, manufacturer, serial numbers, lens info, and GPS coordinates.")
-            input("\n  Press [Enter] to return...")
-        elif action == "icc":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🎨 ICC PROFILE REMOVAL ==={NC}\n")
-            print("  Removes display panel color profiles that fingerprint specific phone models.")
-            input("\n  Press [Enter] to return...")
-        elif action == "scorch":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🔥 SCORCHED EARTH & SUB-PERCEPTUAL PIXEL DITHERING ==={NC}\n")
-            print("  Demuxes raw pixels into memory and writes a clean image container from scratch.")
-            print("  Drops all trailing payloads after IEND, hardware signatures, and steganographic data.")
-            print("  When Pixel Dithering is ON, applies a +-1 RGB jitter to 2% of pixels to defeat perceptual")
-            print("  hashing (pHash/dHash) and LSB watermarks without any visible change.")
-            input("\n  Press [Enter] to return...")
-        elif action == "naming":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🎲 DECOY PRESETS & WORD SLUGS ==={NC}\n")
-            print("  Provides plausible deniability by mimicking everyday apps (WhatsApp, DCIM) or generating readable slugs.")
-            input("\n  Press [Enter] to return...")
-        elif action == "seq":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🔢 SEQUENTIAL NUMBERING ==={NC}\n")
-            print("  Generates ordered series (IMG_0001, IMG_0002) with persistent state tracking.")
-            input("\n  Press [Enter] to return...")
-        elif action == "time":
-            clear_screen()
-            print(f"{CLR_CYAN}=== ⏱️ TIMESTAMP CLAMPING & DAY-FUZZING ==={NC}\n")
-            print("  Static 2020: Forces modification dates to 2020-01-01 to eliminate temporal correlation.")
-            print("  Day-Fuzz: Stamps photos to Today at 00:00:00 so they stay in Today's Gallery feed while masking seconds!")
-            input("\n  Press [Enter] to return...")
-        elif action == "sweeper":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🧹 ACTIVE SWEEPER & PERSISTENT LEDGER ==={NC}\n")
-            print("  Automatically checks monitored folders on startup or periodically every X minutes.")
-            print("  Maintains ~/.shotclean/scrubbed_ledger.json so files using Word Slugs or Decoy names")
-            print("  are never re-renamed across restarts.")
-            input("\n  Press [Enter] to return...")
-        elif action == "vault":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 🔐 ENCRYPTED SAFETY VAULT ==={NC}\n")
-            print("  Keeps encrypted PBKDF2 + AES backups in ~/.shotclean/vault/ before scrubbing,")
-            print("  preserving original extensions (.jpg, .webp, .png) and auto-pruning by size/age.")
-            input("\n  Press [Enter] to return...")
-        elif action == "folders":
-            clear_screen()
-            print(f"{CLR_CYAN}=== 📁 GRANULAR PER-FOLDER RULES & RECURSIVE SCOPE ==={NC}\n")
-            print("  Each folder has independent rules, optional Recursive Subfolder monitoring,")
-            print("  and optional support for screen recordings (.mp4/.mov) and PDF documents.")
-            input("\n  Press [Enter] to return...")
-        elif action in ("back", None):
+        if isinstance(action, int):
+            cursor_idx = show_manual_topic_page(action)
+        elif action in ("back", None, "exit"):
             break
 
 
